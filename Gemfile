@@ -10,7 +10,11 @@ group :maintenance, optional: true do
 end
 
 group :doc do
-  gem "rdoc"
+  if RUBY_ENGINE == "jruby"
+    gem "rdoc", "< 8"
+  else
+    gem "rdoc"
+  end
 end
 
 group :test do

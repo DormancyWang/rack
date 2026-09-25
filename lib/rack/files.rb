@@ -16,6 +16,11 @@ module Rack
   #
   # Handlers can detect if bodies are a Rack::Files, and use mechanisms
   # like sendfile on the +path+.
+  #
+  # Be aware that just like the default behavior of most webservers, Rack::Files
+  # will follow symbolic links encountered under the root. If a symlink points to
+  # a location outside of the root, that target will still be served as part of
+  # the response.
 
   class Files
     ALLOWED_VERBS = %w[GET HEAD OPTIONS]
@@ -24,11 +29,21 @@ module Rack
 
     attr_reader :root
 
+    class Callable
+      def initialize(files)
+        @files = files
+      end
+
+      def call(env)
+        @files.get env
+      end
+    end
+
     def initialize(root, headers = {}, default_mime = 'text/plain')
       @root = (::File.expand_path(root) if root)
       @headers = headers
       @default_mime = default_mime
-      @head = Rack::Head.new(lambda { |env| get env })
+      @head = Rack::Head.new(Callable.new(self))
     end
 
     def call(env)
@@ -76,8 +91,7 @@ module Rack
       mime_type = mime_type path, @default_mime
       headers[CONTENT_TYPE] = mime_type if mime_type
 
-      # Set custom headers
-      headers.merge!(@headers) if @headers
+      assign_headers(headers, request)
 
       status = 200
       size = filesize path
@@ -116,6 +130,10 @@ module Rack
       end
 
       [status, headers, body]
+    end
+
+    def assign_headers(headers, request)
+      headers.merge!(@headers) if @headers
     end
 
     class BaseIterator
@@ -194,7 +212,7 @@ EOF
         status,
         {
           CONTENT_TYPE   => "text/plain",
-          CONTENT_LENGTH => body.size.to_s,
+          CONTENT_LENGTH => body.bytesize.to_s,
           "x-cascade" => "pass"
         }.merge!(headers),
         [body]

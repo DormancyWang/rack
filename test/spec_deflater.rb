@@ -48,8 +48,6 @@ describe Rack::Deflater do
       [accept_encoding, accept_encoding.dup]
     end
 
-    start = Time.now.to_i
-
     # build response
     status, headers, body = build_response(
       options['app_status'] || expected_status,
@@ -73,13 +71,7 @@ describe Rack::Deflater do
       when 'gzip'
         io = StringIO.new(body_text)
         gz = Zlib::GzipReader.new(io)
-        mtime = gz.mtime.to_i
-        if last_mod = headers['last-modified']
-          Time.httpdate(last_mod).to_i.must_equal mtime
-        else
-          mtime.must_be(:<=, Time.now.to_i)
-          mtime.must_be(:>=, start.to_i - 1)
-        end
+        gz.mtime.to_i.must_equal(Rack::Deflater::GZIP_MTIME)
         tmp = gz.read
         gz.close
         tmp
@@ -520,6 +512,43 @@ describe Rack::Deflater do
 
     verify(200, 'foobar', deflate_or_gzip, { 'app_body' => app_body }) do |status, headers, body|
       assert_nil app_body.closed
+    end
+  end
+
+  describe 'custom deflaters' do
+    class MockCompressor
+      def initialize(body)
+        @body = body
+      end
+
+      def each(&block)
+        content = String.new
+        @body.each { |part| content << part }
+        yield "COMPRESSED:#{content}"
+      end
+
+      def close
+        @body.close if @body.respond_to?(:close)
+      end
+    end
+
+    it 'uses custom deflater when provided' do
+      custom_deflater = lambda { |headers, body| MockCompressor.new(body) }
+
+      options = { 'app_body' => 'compressors favourite kind of music is Zip Hop!', 'deflater_options' => { deflaters: { 'zstd' => custom_deflater } } }
+
+      verify(200, 'COMPRESSED:compressors favourite kind of music is Zip Hop!', 'zstd', options) do |status, headers, body|
+        headers['content-encoding'].must_equal 'zstd'
+      end
+    end
+
+    it 'still supports gzip when custom deflaters are provided' do
+      custom_deflater = lambda { |headers, body| MockCompressor.new(body) }
+      options = { 'deflater_options' => { deflaters: { 'zstd' => custom_deflater } }, 'skip_body_verify' => true }
+
+      verify(200, 'What did the server have with a glass of milk? Cookies.', 'gzip', options) do |status, headers, body|
+        headers['content-encoding'].must_equal 'gzip'
+      end
     end
   end
 end

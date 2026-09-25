@@ -46,7 +46,7 @@ describe Rack::Directory do
 
     res.must_be :ok?
     assert_includes(res.body, '<html><head>')
-    assert_includes(res.body, "href='cgi")
+    assert_includes(res.body, "href='./cgi")
   end
 
   it "serve directory indices" do
@@ -149,6 +149,21 @@ describe Rack::Directory do
     res.must_be :forbidden?
   end
 
+  it "not allow directory traversal via root prefix bypass" do
+    Dir.mktmpdir do |dir|
+      root = File.join(dir, "root")
+      outside = "#{root}_test"
+      FileUtils.mkdir_p(root)
+      FileUtils.mkdir_p(outside)
+      FileUtils.touch(File.join(outside, "test.txt"))
+
+      app = Rack::Directory.new(root)
+      res = Rack::MockRequest.new(app).get("/../#{File.basename(outside)}/")
+
+      res.must_be :forbidden?
+    end
+  end
+
   it "not allow dir globs" do
     Dir.mktmpdir do |dir|
       weirds = "uploads/.?/.?"
@@ -243,5 +258,28 @@ describe Rack::Directory do
 
     res.must_be :not_found?
     res.body.must_be :empty?
+  end
+
+  it "handles root paths containing regex metacharacters" do
+    Dir.mktmpdir do |tmpdir|
+      # Create a directory with a name that contains regex metacharacters:
+      root = File.join(tmpdir, "plus+root")
+      FileUtils.mkdir(root)
+
+      # Create a file in the directory:
+      File.write(File.join(root, "file.txt"), "test")
+
+      # Make a request to the directory app:
+      app = Rack::Lint.new(Rack::Directory.new(root))
+      res = Rack::MockRequest.new(app).get("/")
+      res.must_be :ok?
+
+      # This should not leak the root directory:
+      res.body.wont_include root
+      res.body.wont_include Rack::Utils.escape_html(tmpdir)
+
+      # This is always okay:
+      res.body.must_include "file.txt"
+    end
   end
 end

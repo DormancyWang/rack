@@ -33,11 +33,23 @@ module Rack
     EOL = "\r\n"
     FWS = /[ \t]+(?:\r\n[ \t]+)?/ # whitespace with optional folding
     HEADER_VALUE = "(?:[^\r\n]|\r\n[ \t])*" # anything but a non-folding CRLF
-    MULTIPART = %r|\Amultipart/.*boundary=\"?([^\";,]+)\"?|ni
+    MULTIPART = %r|\Amultipart/.*?boundary(\s*)=\"?([^\";,]+)\"?|ni
     MULTIPART_CONTENT_TYPE = /^Content-Type:#{FWS}?(#{HEADER_VALUE})/ni
     MULTIPART_CONTENT_DISPOSITION = /^Content-Disposition:#{FWS}?(#{HEADER_VALUE})/ni
     MULTIPART_CONTENT_ID = /^Content-ID:#{FWS}?(#{HEADER_VALUE})/ni
 
+    # Rack::Multipart::Parser handles parsing of multipart/form-data requests.
+    #
+    # File Parameter Contents
+    #
+    # When processing file uploads, the parser returns a hash containing
+    # information about uploaded files. For +file+ parameters, the hash includes:
+    #
+    # * +:filename+ - The original filename, already URL decoded by the parser
+    # * +:type+ - The content type of the uploaded file  
+    # * +:name+ - The parameter name from the form
+    # * +:tempfile+ - A Tempfile object containing the uploaded data
+    # * +:head+ - The raw header content for this part
     class Parser
       BUFSIZE = 1_048_576
       TEXT_PLAIN = "text/plain"
@@ -46,6 +58,34 @@ module Rack
 
         Tempfile.new(["RackMultipart", extension])
       }
+
+      BOUNDARY_START_LIMIT = 16 * 1024
+      private_constant :BOUNDARY_START_LIMIT
+
+      MIME_HEADER_BYTESIZE_LIMIT = 64 * 1024
+      private_constant :MIME_HEADER_BYTESIZE_LIMIT
+
+      env_int = lambda do |key, val|
+        if str_val = ENV[key]
+          begin
+            val = Integer(str_val, 10)
+          rescue ArgumentError
+            raise ArgumentError, "non-integer value provided for environment variable #{key}"
+          end
+        end
+
+        val
+      end
+
+      BUFFERED_UPLOAD_BYTESIZE_LIMIT = env_int.call("RACK_MULTIPART_BUFFERED_UPLOAD_BYTESIZE_LIMIT", 16 * 1024 * 1024)
+      private_constant :BUFFERED_UPLOAD_BYTESIZE_LIMIT
+
+      bytesize_limit = env_int.call("RACK_MULTIPART_PARSER_BYTESIZE_LIMIT", 10 * 1024 * 1024 * 1024)
+      PARSER_BYTESIZE_LIMIT = bytesize_limit > 0 ? bytesize_limit : nil
+      private_constant :PARSER_BYTESIZE_LIMIT
+
+      CONTENT_DISPOSITION_QUOTED_ESCAPES_LIMIT = env_int.call("RACK_MULTIPART_CONTENT_DISPOSITION_QUOTED_ESCAPES_LIMIT", 8 * 1024)
+      private_constant :CONTENT_DISPOSITION_QUOTED_ESCAPES_LIMIT
 
       class BoundedIO # :nodoc:
         def initialize(io, content_length)
@@ -77,13 +117,21 @@ module Rack
       end
 
       MultipartInfo = Struct.new :params, :tmp_files
-      EMPTY         = MultipartInfo.new(nil, [])
+      EMPTY         = MultipartInfo.new(nil, [].freeze).freeze
 
       def self.parse_boundary(content_type)
         return unless content_type
         data = content_type.match(MULTIPART)
         return unless data
-        data[1]
+
+        unless data[1].empty?
+          raise Error, "whitespace between boundary parameter name and equal sign"
+        end
+        if data.post_match.match?(/boundary\s*=/i)
+          raise BoundaryTooLongError, "multiple boundary parameters found in multipart content type"
+        end
+
+        data[2]
       end
 
       def self.parse(io, content_length, content_type, tmpfile, bufsize, qp)
@@ -91,6 +139,10 @@ module Rack
 
         boundary = parse_boundary content_type
         return EMPTY unless boundary
+
+        if PARSER_BYTESIZE_LIMIT && content_length && content_length > PARSER_BYTESIZE_LIMIT
+          raise Error, "multipart Content-Length #{content_length} exceeds limit of #{PARSER_BYTESIZE_LIMIT} bytes"
+        end
 
         if boundary.length > 70
           # RFC 1521 Section 7.2.1 imposes a 70 character maximum for the boundary.
@@ -153,7 +205,12 @@ module Rack
         end
 
         def on_mime_head(mime_index, head, filename, content_type, name)
+          check_total_part_limit
+
           if filename
+            # This will raise an exception if we are at the limit:
+            check_file_part_limit
+
             body = @tempfile.call(filename, content_type)
             body.binmode if body.respond_to?(:binmode)
             klass = TempfilePart
@@ -164,8 +221,6 @@ module Rack
           end
 
           @mime_parts[mime_index] = klass.new(body, head, filename, content_type, name)
-
-          check_part_limits
         end
 
         def on_mime_body(mime_index, content)
@@ -177,19 +232,22 @@ module Rack
 
         private
 
-        def check_part_limits
+        def check_file_part_limit
           file_limit = Utils.multipart_file_limit
-          part_limit = Utils.multipart_total_part_limit
 
           if file_limit && file_limit > 0
-            if @open_files >= file_limit
+            if (@open_files + 1) >= file_limit
               @mime_parts.each(&:close)
               raise MultipartPartLimitError, 'Maximum file multiparts in content reached'
             end
           end
+        end
+
+        def check_total_part_limit
+          part_limit = Utils.multipart_total_part_limit
 
           if part_limit && part_limit > 0
-            if @mime_parts.size >= part_limit
+            if (@mime_parts.size + 1) >= part_limit
               @mime_parts.each(&:close)
               raise MultipartTotalPartLimitError, 'Maximum total multiparts in content reached'
             end
@@ -206,9 +264,13 @@ module Rack
 
         @state = :FAST_FORWARD
         @mime_index = 0
+        @body_retained = nil
+        @retained_size = 0
+        @total_bytes_read = (0 if PARSER_BYTESIZE_LIMIT)
+        @content_disposition_quoted_escapes = 0
         @collector = Collector.new tempfile
 
-        @sbuf = StringScanner.new("".dup)
+        @sbuf = StringScanner.new("".b)
         @body_regex = /(?:#{EOL}|\A)--#{Regexp.quote(boundary)}(?:#{EOL}|--)/m
         @body_regex_at_end = /#{@body_regex}\z/m
         @end_boundary_size = boundary.bytesize + 4 # (-- at start, -- at finish)
@@ -217,6 +279,7 @@ module Rack
       end
 
       def parse(io)
+        @total_bytes_read &&= nil if io.is_a?(BoundedIO)
         outbuf = String.new
         read_data(io, outbuf)
 
@@ -255,6 +318,12 @@ module Rack
       def read_data(io, outbuf)
         content = io.read(@bufsize, outbuf)
         handle_empty_content!(content)
+        if @total_bytes_read
+          @total_bytes_read += content.bytesize
+          if @total_bytes_read > PARSER_BYTESIZE_LIMIT
+            raise Error, "multipart upload exceeds limit of #{PARSER_BYTESIZE_LIMIT} bytes"
+          end
+        end
         @sbuf.concat(content)
       end
 
@@ -282,6 +351,10 @@ module Rack
 
             # retry for opening boundary
           else
+            # We raise if we don't find the multipart boundary, to avoid unbounded memory
+            # buffering. Note that the actual limit is the higher of 16KB and the buffer size (1MB by default)
+            raise Error, "multipart boundary not found within limit" if @sbuf.string.bytesize > BOUNDARY_START_LIMIT
+
             # no boundary found, keep reading data
             return :want_read
           end
@@ -300,16 +373,27 @@ module Rack
 
       CONTENT_DISPOSITION_MAX_PARAMS = 16
       CONTENT_DISPOSITION_MAX_BYTES = 1536
+      OBS_UNFOLD = /\r\n([ \t])/
+      private_constant :OBS_UNFOLD
+
       def handle_mime_head
         if @sbuf.scan_until(@head_regex)
           head = @sbuf[1]
           content_type = head[MULTIPART_CONTENT_TYPE, 1]
+          content_type.gsub!(OBS_UNFOLD, '\1') if content_type
+
           if (disposition = head[MULTIPART_CONTENT_DISPOSITION, 1]) &&
               disposition.bytesize <= CONTENT_DISPOSITION_MAX_BYTES
 
+            # Implement OBS unfolding (RFC 5322 Section 2.2.3)
+            disposition.gsub!(OBS_UNFOLD, '\1')
+
             # ignore actual content-disposition value (should always be form-data)
-            i = disposition.index(';')
-            disposition.slice!(0, i+1)
+            if i = disposition.index(';')
+              disposition.slice!(0, i + 1)
+            else
+              disposition = ''
+            end
             param = nil
             num_params = 0
 
@@ -344,6 +428,11 @@ module Rack
                   # stop parsing parameter value if found ending quote
                   break if c == '"'
 
+                  @content_disposition_quoted_escapes += 1
+                  if @content_disposition_quoted_escapes > CONTENT_DISPOSITION_QUOTED_ESCAPES_LIMIT
+                    raise Error, "number of quoted escapes during content disposition parsing exceeds limit"
+                  end
+
                   escaped_char = disposition.slice!(0, 1)
                   if param == 'filename' && escaped_char != '"'
                     # Possible IE uploaded filename, append both escape backslash and value
@@ -371,8 +460,6 @@ module Rack
                 name = value
               when 'filename'
                 filename = value
-              when 'filename*'
-                filename_star = value
               # else
               # ignore other parameters
               end
@@ -386,11 +473,7 @@ module Rack
             name = head[MULTIPART_CONTENT_ID, 1]
           end
 
-          if filename_star
-            encoding, _, filename = filename_star.split("'", 3)
-            filename = normalize_filename(filename || '')
-            filename.force_encoding(find_encoding(encoding))
-          elsif filename
+          if filename
             filename = normalize_filename(filename)
           end
 
@@ -398,16 +481,30 @@ module Rack
             name = filename || "#{content_type || TEXT_PLAIN}[]".dup
           end
 
+          # Mime part head data is retained for both TempfilePart and BufferPart
+          # for the entireity of the parse, even though it isn't used for BufferPart.
+          update_retained_size(head.bytesize)
+
+          # If a filename is given, a TempfilePart will be used, so the body will
+          # not be buffered in memory. However, if a filename is not given, a BufferPart
+          # will be used, and the body will be buffered in memory.
+          @body_retained = !filename
+
           @collector.on_mime_head @mime_index, head, filename, content_type, name
           @state = :MIME_BODY
         else
-          :want_read
+          # We raise if the mime part header is too large, to avoid unbounded memory
+          # buffering. Note that the actual limit is the higher of 64KB and the buffer size (1MB by default)
+          raise Error, "multipart mime part header too large" if @sbuf.rest.bytesize > MIME_HEADER_BYTESIZE_LIMIT
+
+          return :want_read
         end
       end
 
       def handle_mime_body
         if (body_with_boundary = @sbuf.check_until(@body_regex)) # check but do not advance the pointer yet
           body = body_with_boundary.sub(@body_regex_at_end, '') # remove the boundary from the string
+          update_retained_size(body.bytesize) if @body_retained
           @collector.on_mime_body @mime_index, body
           @sbuf.pos += body.length + 2 # skip \r\n after the content
           @state = :CONSUME_TOKEN
@@ -416,11 +513,20 @@ module Rack
           # Save what we have so far
           if @rx_max_size < @sbuf.rest_size
             delta = @sbuf.rest_size - @rx_max_size
-            @collector.on_mime_body @mime_index, @sbuf.peek(delta)
+            body = @sbuf.peek(delta)
+            update_retained_size(body.bytesize) if @body_retained
+            @collector.on_mime_body @mime_index, body
             @sbuf.pos += delta
             @sbuf.string = @sbuf.rest
           end
           :want_read
+        end
+      end
+
+      def update_retained_size(size)
+        @retained_size += size
+        if @retained_size > BUFFERED_UPLOAD_BYTESIZE_LIMIT
+          raise Error, "multipart data over retained size limit"
         end
       end
 
@@ -441,6 +547,10 @@ module Rack
         if filename.scan(/%.?.?/).all? { |s| /%[0-9a-fA-F]{2}/.match?(s) }
           filename = Utils.unescape_path(filename)
         end
+
+        # Interpret as UTF-8 if it's binary and contains valid UTF-8 bytes
+        # (handles "commonly deployed systems" that send UTF-8 directly)
+        filename.force_encoding(Encoding::UTF_8)
 
         filename.scrub!
 
@@ -467,6 +577,7 @@ module Rack
             rest.each do |param|
               k, v = param.split('=', 2)
               k.strip!
+              next unless v
               v.strip!
               v = v[1..-2] if v.start_with?('"') && v.end_with?('"')
               if k == "charset"

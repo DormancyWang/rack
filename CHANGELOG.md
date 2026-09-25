@@ -6,13 +6,118 @@ All notable changes to this project will be documented in this file. For info on
 
 ### SPEC Changes
 
-- Request environment keys must now be strings. [#2310](https://github.com/rack/rack/issues/2310), [@jeremyevans])
+- Define `rack.response_finished` callback arguments more strictly. ([#2365](https://github.com/rack/rack/pull/2365), [@skipkayhil](https://github.com/skipkayhil))
+
+### Added
+
+- Add `Rack::Files#assign_headers` to allow overriding how the configured file headers are set. ([#2377](https://github.com/rack/rack/pull/2377), [@codergeek121](https://github.com/codergeek121))
+- Add support for `rack.response_finished` to `Rack::TempfileReaper`. ([#2363](https://github.com/rack/rack/pull/2363), [@skipkayhil](https://github.com/skipkayhil))
+- Add support for streaming bodies when using `Rack::Events`. ([#2375](github.com/rack/rack/pull/2375), [@unflxw](https://github.com/unflxw))
+- Add `deflaters` option to `Rack::Deflater` to enable custom compression algorithms like zstd. ([#2168](https://github.com/rack/rack/issues/2168), [@alexanderadam](https://github.com/alexanderadam))
+- Add `Rack::Request#prefetch?` for identifying requests with `Sec-Purpose: prefetch` header set. ([#2405](https://github.com/rack/rack/pull/2405), [@glaszig](https://github.com/glaszig))
+- Add `rack.request.config` environment key to configure Rack::Request behavior.
+- Add `Rack::Request#headers` for simpler access to request headers by header name. ([#1881](https://github.com/rack/rack/pull/1881), [@jeremyevans](https://github.com/jeremyevans))
+- Allow disabling the `Rack::QueryParser` bytesize and params limits by passing `nil` for the `bytesize_limit`/`params_limit` keyword arguments, or a negative value for `RACK_QUERY_PARSER_BYTESIZE_LIMIT`/`RACK_QUERY_PARSER_PARAMS_LIMIT`. ([#2492](https://github.com/rack/rack/pull/2492), [@alpaca-tc](https://github.com/alpaca-tc))
+
+### Changed
+
+- Require Ruby 2.7.3 or newer and replace `ruby2_keywords` with argument forwarding.
+- Raise before exceeding a part limit, not after. ([#2362](https://github.com/rack/rack/pull/2362), [@matthew-puku](https://github.com/matthew-puku))
+- Rack::Deflater now uses a fixed GZip mtime value. ([#2372](https://github.com/rack/rack/pull/2372), [@bensheldon](https://github.com/bensheldon))
+- Multipart parser drops support for RFC 2231 `filename*` parameter (prohibited by RFC 7578) and now properly handles UTF-8 encoded filenames via percent-encoding and direct UTF-8 bytes. ([#2398](https://github.com/rack/rack/pull/2398), [@wtn](https://github.com/wtn))
+- The query parser now raises `Rack::QueryParser::IncompatibleEncodingError` if we try to parse params that are not ASCII compatible. ([#2416](https://github.com/rack/rack/pull/2416), [@bquorning](https://github.com/bquorning))
+- The mime type for `.pem` files has been changed from `application/x-x509-ca-cert` to `application/x-pem-file`. ([#2435](https://github.com/rack/rack/pull/2435), [@jeremyevans](https://github.com/jeremyevans))
+- Freeze `Rack::Auth::AbstractRequest::AUTHORIZATION_KEYS`, `Rack::Utils::STATUS_WITH_NO_ENTITY_BODY`, `Rack::Multipart::Parser::EMPTY`, `Rack::Utils.default_query_parser`, and internal constants in `Rack::Lint`. ([#2428](https://github.com/rack/rack/pull/2428), [@jhawthorn](https://github.com/jhawthorn))
+
+### Fixed
+
+- `Rack::MethodOverride` now rescues `Rack::BadRequest` to avoid the middleware raising an exception for invalid request bodies. ([#2505](https://github.com/rack/rack/pull/2505), [@navidemad](https://github.com/navidemad))
+- `Rack::Multipart::UploadedFile` now delegates keyword arguments to the wrapped tempfile. Calls such as `uploaded_file.readlines(chomp: true)` raised `TypeError` on Ruby 3.0+. ([#2481](https://github.com/rack/rack/issues/2481), [#2499](https://github.com/rack/rack/pull/2499), [@SeanLF](https://github.com/SeanLF))
+- Multipart parser: limit MIME header size check to the unread buffer region to avoid false `multipart mime part header too large` errors when previously read data accumulates in the scan buffer. ([#2392](https://github.com/rack/rack/pull/2392), [@alpaca-tc](https://github.com/alpaca-tc), [@willnet](https://github.com/willnet), [@krororo](https://github.com/krororo))
+- Multipart parser: add nil guards to prevent `NoMethodError` crashes when handling `Content-Disposition` without parameters and `Content-Type` parameters without '='. ([@haruki0409](https://github.com/haruki0409))
+
+## [3.2.7] - 2026-08-13
+
+### Fixed
+
+- Restore Ruby 2.4/2.5 compatibility.
+
+## [3.2.6] - 2026-04-01
+
+### Security
+
+- [CVE-2026-34763](https://github.com/advisories/GHSA-7mqq-6cf9-v2qp) Root directory disclosure via unescaped regex interpolation in `Rack::Directory`.
+- [CVE-2026-34230](https://github.com/advisories/GHSA-v569-hp3g-36wr) Avoid O(n^2) algorithm in `Rack::Utils.select_best_encoding` which could lead to denial of service.
+- [CVE-2026-32762](https://github.com/advisories/GHSA-qfgr-crr9-7r49) Forwarded header semicolon injection enables Host and Scheme spoofing.
+- [CVE-2026-26961](https://github.com/advisories/GHSA-vgpv-f759-9wx3) Raise error for multipart requests with multiple boundary parameters.
+- [CVE-2026-34786](https://github.com/advisories/GHSA-q4qf-9j86-f5mh) `Rack::Static` `header_rules` bypass via URL-encoded path mismatch.
+- [CVE-2026-34831](https://github.com/advisories/GHSA-q2ww-5357-x388) `Content-Length` mismatch in `Rack::Files` error responses.
+- [CVE-2026-34826](https://github.com/advisories/GHSA-x8cg-fq8g-mxfx) Multipart byte range processing allows denial of service via excessive overlapping ranges.
+- [CVE-2026-34835](https://github.com/advisories/GHSA-g2pf-xv49-m2h5) `Rack::Request` accepts invalid Host characters, enabling host allowlist bypass.
+- [CVE-2026-34830](https://github.com/advisories/GHSA-qv7j-4883-hwh7) `Rack::Sendfile` header-based `X-Accel-Mapping` regex injection enables unauthorized `X-Accel-Redirect`.
+- [CVE-2026-34785](https://github.com/advisories/GHSA-h2jq-g4cq-5ppq) `Rack::Static` prefix matching can expose unintended files under the static root.
+- [CVE-2026-34829](https://github.com/advisories/GHSA-8vqr-qjwx-82mw) Multipart parsing without `Content-Length` header allows unbounded chunked file uploads.
+- [CVE-2026-34827](https://github.com/advisories/GHSA-v6x5-cg8r-vv6x) Multipart header parsing allows denial of service via escape-heavy quoted parameters.
+- [CVE-2026-26962](https://github.com/advisories/GHSA-rx22-g9mx-qrhv) Improper unfolding of folded multipart headers preserves CRLF in parsed parameter values.
+
+## [3.2.5] - 2026-02-16
+
+### Security
+
+- [CVE-2026-25500](https://github.com/advisories/GHSA-whrj-4476-wvmp) XSS injection via malicious filename in `Rack::Directory`.
+- [CVE-2026-22860](https://github.com/advisories/GHSA-mxw3-3hh2-x2mh) Directory traversal via root prefix bypass in `Rack::Directory`.
+
+### Fixed
+
+- Fix `Rack::MockResponse#body` when the body is a Proc. ([#2420](https://github.com/rack/rack/pull/2420), [#2423](https://github.com/rack/rack/pull/2423), [@tavianator](https://github.com/tavianator), [@ioquatix])
+
+## [3.2.4] - 2025-11-03
+
+### Fixed
+
+- Multipart parser: limit MIME header size check to the unread buffer region to avoid false `multipart mime part header too large` errors when previously read data accumulates in the scan buffer. ([#2392](https://github.com/rack/rack/pull/2392), [@alpaca-tc](https://github.com/alpaca-tc), [@willnet](https://github.com/willnet), [@krororo](https://github.com/krororo))
+
+## [3.2.3] - 2025-10-10
+
+### Security
+
+- [CVE-2025-61780](https://github.com/advisories/GHSA-r657-rxjc-j557) Improper handling of headers in `Rack::Sendfile` may allow proxy bypass.
+- [CVE-2025-61919](https://github.com/advisories/GHSA-6xw4-3v39-52mm) Unbounded read in `Rack::Request` form parsing can lead to memory exhaustion.
+
+## [3.2.2] - 2025-10-07
+
+### Security
+
+- [CVE-2025-61772](https://github.com/advisories/GHSA-wpv5-97wm-hp9c) Multipart parser buffers unbounded per-part headers, enabling DoS (memory exhaustion)
+- [CVE-2025-61771](https://github.com/advisories/GHSA-w9pc-fmgc-vxvw) Multipart parser buffers large non‑file fields entirely in memory, enabling DoS (memory exhaustion)
+- [CVE-2025-61770](https://github.com/advisories/GHSA-p543-xpfm-54cp) Unbounded multipart preamble buffering enables DoS (memory exhaustion)
+
+## [3.2.1] -- 2025-09-02
+
+### Added
+
+- Add support for streaming bodies when using `Rack::Events`. ([#2375](github.com/rack/rack/pull/2375), [@unflxw](https://github.com/unflxw))
+
+### Fixed
+
+- Fix an issue where a `NoMethodError` would be raised when using `Rack::Events` with streaming bodies. ([#2375](github.com/rack/rack/pull/2375), [@unflxw](https://github.com/unflxw))
+
+## [3.2.0] - 2025-07-31
+
+This release continues Rack's evolution toward a cleaner, more efficient foundation while maintaining backward compatibility for most applications. The breaking changes primarily affect deprecated functionality, so most users should experience a smooth upgrade with improved performance and standards compliance.
+
+### SPEC Changes
+
+- Request environment keys must now be strings. ([#2310](https://github.com/rack/rack/issues/2310), [@jeremyevans])
 - Add `nil` as a valid return from a Response `body.to_path` ([#2318](https://github.com/rack/rack/pull/2318), [@MSP-Greg])
+- `Rack::Lint#check_header_value` is relaxed, only disallowing CR/LF/NUL characters. ([#2354](https://github.com/rack/rack/pull/2354), [@ioquatix])
 
 ### Added
 
 - Introduce `Rack::VERSION` constant. ([#2199](https://github.com/rack/rack/pull/2199), [@ioquatix])
-- ISO-2022-JP encoded parts within MIME Multipart sections of an HTTP request body will now be converted to UTF-8. ([#2245](https://github.com/rack/rack/pull/2245), [@nappa](https://github.com/nappa))
+- `ISO-2022-JP` encoded parts within MIME Multipart sections of an HTTP request body will now be converted to `UTF-8`. ([#2245](https://github.com/rack/rack/pull/2245), [@nappa](https://github.com/nappa))
+- Add `Rack::Request#query_parser=` to allow setting the query parser to use. ([#2349](https://github.com/rack/rack/pull/2349), [@jeremyevans])
+- Add `Rack::Request#form_pairs` to access form data as raw key-value pairs, preserving duplicate keys. ([#2351](https://github.com/rack/rack/pull/2351), [@matthewd])
 
 ### Changed
 
@@ -20,6 +125,9 @@ All notable changes to this project will be documented in this file. For info on
 - `Rack::MediaType#params` now handles empty strings. ([#2229](https://github.com/rack/rack/pull/2229), [@jeremyevans])
 - Avoid unnecessary calls to the `ip_filter` lambda to evaluate `Request#ip` ([#2287](https://github.com/rack/rack/pull/2287), [@willbryant])
 - Only calculate `Request#ip` once per request ([#2292](https://github.com/rack/rack/pull/2292), [@willbryant])
+- `Rack::Builder` `#use`, `#map`, and `#run` methods now return `nil`. ([#2355](https://github.com/rack/rack/pull/2355), [@ioquatix])
+- Directly close the body in `Rack::ConditionalGet` when the response is `304 Not Modified`. ([#2353](https://github.com/rack/rack/pull/2353), [@ioquatix])
+- Directly close the body in `Rack::Head` when the request method is `HEAD`([#2360](https://github.com/rack/rack/pull/2360), [@skipkayhil](https://github.com/skipkayhil))
 
 ### Deprecated
 
@@ -39,6 +147,62 @@ All notable changes to this project will be documented in this file. For info on
 - Fix `NoMethodError` in `Rack::Request#wrap_ipv6` when `x-forwarded-host` is empty. ([#2270](https://github.com/rack/rack/pull/2270), [@oieioi](https://github.com/oieioi))
 - Fix the specification for `SERVER_PORT` which was incorrectly documented as required to be an `Integer` if present - it must be a `String` containing digits only. ([#2296](https://github.com/rack/rack/pull/2296), [@ioquatix])
 - `SERVER_NAME` and `HTTP_HOST` are now more strictly validated according to the relevant specifications. ([#2298](https://github.com/rack/rack/pull/2298), [@ioquatix])
+- `Rack::Lint` now disallows `PATH_INFO="" SCRIPT_NAME=""`. ([#2298](https://github.com/rack/rack/issues/2307), [@jeremyevans])
+
+## [3.1.22] - 2026-08-13
+
+### Security
+
+- [CVE-2026-26962](https://github.com/advisories/GHSA-rx22-g9mx-qrhv) Improper unfolding of folded multipart headers preserves CRLF in parsed parameter values.
+
+### Fixed
+
+- Restore Ruby 2.4/2.5 compatibility.
+
+## [3.1.21] - 2026-04-01
+
+### Security
+
+- [CVE-2026-34763](https://github.com/advisories/GHSA-7mqq-6cf9-v2qp) Root directory disclosure via unescaped regex interpolation in `Rack::Directory`.
+- [CVE-2026-34230](https://github.com/advisories/GHSA-v569-hp3g-36wr) Avoid O(n^2) algorithm in `Rack::Utils.select_best_encoding` which could lead to denial of service.
+- [CVE-2026-32762](https://github.com/advisories/GHSA-qfgr-crr9-7r49) Forwarded header semicolon injection enables Host and Scheme spoofing.
+- [CVE-2026-26961](https://github.com/advisories/GHSA-vgpv-f759-9wx3) Raise error for multipart requests with multiple boundary parameters.
+- [CVE-2026-34786](https://github.com/advisories/GHSA-q4qf-9j86-f5mh) `Rack::Static` `header_rules` bypass via URL-encoded path mismatch.
+- [CVE-2026-34831](https://github.com/advisories/GHSA-q2ww-5357-x388) `Content-Length` mismatch in `Rack::Files` error responses.
+- [CVE-2026-34826](https://github.com/advisories/GHSA-x8cg-fq8g-mxfx) Multipart byte range processing allows denial of service via excessive overlapping ranges.
+- [CVE-2026-34835](https://github.com/advisories/GHSA-g2pf-xv49-m2h5) `Rack::Request` accepts invalid Host characters, enabling host allowlist bypass.
+- [CVE-2026-34830](https://github.com/advisories/GHSA-qv7j-4883-hwh7) `Rack::Sendfile` header-based `X-Accel-Mapping` regex injection enables unauthorized `X-Accel-Redirect`.
+- [CVE-2026-34785](https://github.com/advisories/GHSA-h2jq-g4cq-5ppq) `Rack::Static` prefix matching can expose unintended files under the static root.
+- [CVE-2026-34829](https://github.com/advisories/GHSA-8vqr-qjwx-82mw) Multipart parsing without `Content-Length` header allows unbounded chunked file uploads.
+- [CVE-2026-34827](https://github.com/advisories/GHSA-v6x5-cg8r-vv6x) Multipart header parsing allows denial of service via escape-heavy quoted parameters.
+
+## [3.1.20] - 2026-02-16
+
+### Security
+
+- [CVE-2026-25500](https://github.com/advisories/GHSA-whrj-4476-wvmp) XSS injection via malicious filename in `Rack::Directory`.
+- [CVE-2026-22860](https://github.com/advisories/GHSA-mxw3-3hh2-x2mh) Directory traversal via root prefix bypass in `Rack::Directory`.
+
+## [3.1.19] - 2025-11-03
+
+### Fixed
+
+- Multipart parser: limit MIME header size check to the unread buffer region to avoid false `multipart mime part header too large` errors when previously read data accumulates in the scan buffer. ([#2392](https://github.com/rack/rack/pull/2392), [@alpaca-tc](https://github.com/alpaca-tc), [@willnet](https://github.com/willnet), [@krororo](https://github.com/krororo))
+
+## [3.1.18] - 2025-10-10
+
+### Security
+
+- [CVE-2025-61780](https://github.com/advisories/GHSA-r657-rxjc-j557) Improper handling of headers in `Rack::Sendfile` may allow proxy bypass.
+- [CVE-2025-61919](https://github.com/advisories/GHSA-6xw4-3v39-52mm) Unbounded read in `Rack::Request` form parsing can lead to memory exhaustion.
+
+## [3.1.17] - 2025-10-07
+
+### Security
+
+- [CVE-2025-61772](https://github.com/advisories/GHSA-wpv5-97wm-hp9c) Multipart parser buffers unbounded per-part headers, enabling DoS (memory exhaustion)
+- [CVE-2025-61771](https://github.com/advisories/GHSA-w9pc-fmgc-vxvw) Multipart parser buffers large non‑file fields entirely in memory, enabling DoS (memory exhaustion)
+- [CVE-2025-61770](https://github.com/advisories/GHSA-p543-xpfm-54cp) Unbounded multipart preamble buffering enables DoS (memory exhaustion)
 
 ## [3.1.16] - 2025-06-04
 
@@ -52,9 +216,11 @@ All notable changes to this project will be documented in this file. For info on
 
 ## [3.1.14] - 2025-05-06
 
+:warning: **This release includes a security fix that may cause certain routes in previously working applications to fail if query parameters exceed 4,096 in count or 4 MB in total size. See <https://github.com/rack/rack/discussions/2356> for more details.**
+
 ### Security
 
-- [CVE-2025-46727](https://github.com/rack/rack/security/advisories/GHSA-gjh7-p2fx-99vx) Unbounded parameter parsing in `Rack::QueryParser` can lead to memory exhaustion.
+- [CVE-2025-46727](https://github.com/advisories/GHSA-gjh7-p2fx-99vx) Unbounded parameter parsing in `Rack::QueryParser` can lead to memory exhaustion.
 
 ## [3.1.13] - 2025-04-13
 
@@ -64,19 +230,19 @@ All notable changes to this project will be documented in this file. For info on
 
 ### Security
 
-- [CVE-2025-27610](https://github.com/rack/rack/security/advisories/GHSA-7wqh-767x-r66v) Local file inclusion in `Rack::Static`.
+- [CVE-2025-27610](https://github.com/advisories/GHSA-7wqh-767x-r66v) Local file inclusion in `Rack::Static`.
 
 ## [3.1.11] - 2025-03-04
 
 ### Security
 
-- [CVE-2025-27111](https://github.com/rack/rack/security/advisories/GHSA-8cgq-6mh2-7j6v) Possible Log Injection in `Rack::Sendfile`.
+- [CVE-2025-27111](https://github.com/advisories/GHSA-8cgq-6mh2-7j6v) Possible Log Injection in `Rack::Sendfile`.
 
 ## [3.1.10] - 2025-02-12
 
 ### Security
 
-- [CVE-2025-25184](https://github.com/rack/rack/security/advisories/GHSA-7g2v-jj9q-g3rg) Possible Log Injection in `Rack::CommonLogger`.
+- [CVE-2025-25184](https://github.com/advisories/GHSA-7g2v-jj9q-g3rg) Possible Log Injection in `Rack::CommonLogger`.
 
 ## [3.1.9] - 2025-01-31
 
@@ -109,7 +275,7 @@ All notable changes to this project will be documented in this file. For info on
 
 ### Security
 
-- Fix potential ReDoS attack in `Rack::Request#parse_http_accept_header`. ([GHSA-cj83-2ww7-mvq7](https://github.com/rack/rack/security/advisories/GHSA-cj83-2ww7-mvq7), [@dwisiswant0](https://github.com/dwisiswant0))
+- Fix potential ReDoS attack in `Rack::Request#parse_http_accept_header`. ([GHSA-cj83-2ww7-mvq7](https://github.com/advisories/GHSA-cj83-2ww7-mvq7), [@dwisiswant0](https://github.com/dwisiswant0))
 
 ## [3.1.4] - 2024-06-22
 
@@ -136,7 +302,7 @@ All notable changes to this project will be documented in this file. For info on
 
 :warning: **This release includes several breaking changes.** Refer to the **Removed** section below for the list of deprecated methods that have been removed in this release.
 
-Rack v3.1 is primarily a maintenance release that removes features deprecated in Rack v3.0. Alongside these removals, there are several improvements to the Rack SPEC, mainly focused on enhancing input and output handling. These changes aim to make Rack more efficient and align better with the requirements of server implementations and relevant HTTP specifications.
+This release is primarily a maintenance release that removes features deprecated in Rack v3.0. Alongside these removals, there are several improvements to the Rack SPEC, mainly focused on enhancing input and output handling. These changes aim to make Rack more efficient and align better with the requirements of server implementations and relevant HTTP specifications.
 
 ### SPEC Changes
 
@@ -197,9 +363,11 @@ Rack v3.1 is primarily a maintenance release that removes features deprecated in
 
 ## [3.0.16] - 2025-05-06
 
+:warning: **This release includes a security fix that may cause certain routes in previously working applications to fail if query parameters exceed 4,096 in count or 4 MB in total size. See <https://github.com/rack/rack/discussions/2356> for more details.**
+
 ### Security
 
-- [CVE-2025-46727](https://github.com/rack/rack/security/advisories/GHSA-gjh7-p2fx-99vx) Unbounded parameter parsing in `Rack::QueryParser` can lead to memory exhaustion.
+- [CVE-2025-46727](https://github.com/advisories/GHSA-gjh7-p2fx-99vx) Unbounded parameter parsing in `Rack::QueryParser` can lead to memory exhaustion.
 
 ## [3.0.15] - 2025-04-13
 
@@ -209,13 +377,13 @@ Rack v3.1 is primarily a maintenance release that removes features deprecated in
 
 ### Security
 
-- [CVE-2025-27610](https://github.com/rack/rack/security/advisories/GHSA-7wqh-767x-r66v) Local file inclusion in `Rack::Static`.
+- [CVE-2025-27610](https://github.com/advisories/GHSA-7wqh-767x-r66v) Local file inclusion in `Rack::Static`.
 
 ## [3.0.13] - 2025-03-04
 
 ### Security
 
-- [CVE-2025-27111](https://github.com/rack/rack/security/advisories/GHSA-8cgq-6mh2-7j6v) Possible Log Injection in `Rack::Sendfile`.
+- [CVE-2025-27111](https://github.com/advisories/GHSA-8cgq-6mh2-7j6v) Possible Log Injection in `Rack::Sendfile`.
 
 ### Fixed
 
@@ -225,7 +393,7 @@ Rack v3.1 is primarily a maintenance release that removes features deprecated in
 
 ### Security
 
-- [CVE-2025-25184](https://github.com/rack/rack/security/advisories/GHSA-7g2v-jj9q-g3rg) Possible Log Injection in `Rack::CommonLogger`.
+- [CVE-2025-25184](https://github.com/advisories/GHSA-7g2v-jj9q-g3rg) Possible Log Injection in `Rack::CommonLogger`.
 
 ## [3.0.11] - 2024-05-10
 
@@ -315,6 +483,8 @@ Rack v3.1 is primarily a maintenance release that removes features deprecated in
 
 ## [3.0.0] - 2022-09-06
 
+This release introduces major improvements to Rack, including enhanced support for streaming responses, expanded protocol handling, and stricter compliance with HTTP standards. It refines middleware interfaces, improves multipart and hijack handling, and strengthens security and error reporting. The update also brings performance optimizations, better compatibility with modern Ruby versions, and numerous bug fixes, making Rack more robust and flexible for web application development.
+
 - No changes
 
 ## [3.0.0.rc1] - 2022-09-04
@@ -403,6 +573,64 @@ Rack v3.1 is primarily a maintenance release that removes features deprecated in
 - Fix multipart filename generation for filenames that contain spaces. Encode spaces as "%20" instead of "+" which will be decoded properly by the multipart parser. ([#1736](https://github.com/rack/rack/pull/1645), [@muirdm](https://github.com/muirdm))
 - `Rack::Request#scheme` returns `ws` or `wss` when one of the `X-Forwarded-Scheme` / `X-Forwarded-Proto` headers is set to `ws` or `wss`, respectively. ([#1730](https://github.com/rack/rack/issues/1730), [@erwanst](https://github.com/erwanst))
 
+## [2.2.24] - 2026-08-13
+
+### Security
+
+- [CVE-2026-26962](https://github.com/advisories/GHSA-rx22-g9mx-qrhv) Improper unfolding of folded multipart headers preserves CRLF in parsed parameter values.
+
+## [2.2.23] - 2026-04-01
+
+### Security
+
+- [CVE-2026-34763](https://github.com/advisories/GHSA-7mqq-6cf9-v2qp) Root directory disclosure via unescaped regex interpolation in `Rack::Directory`.
+- [CVE-2026-34230](https://github.com/advisories/GHSA-v569-hp3g-36wr) Avoid O(n^2) algorithm in `Rack::Utils.select_best_encoding` which could lead to denial of service.
+- [CVE-2026-26961](https://github.com/advisories/GHSA-vgpv-f759-9wx3) Raise error for multipart requests with multiple boundary parameters.
+- [CVE-2026-34786](https://github.com/advisories/GHSA-q4qf-9j86-f5mh) `Rack::Static` `header_rules` bypass via URL-encoded path mismatch.
+- [CVE-2026-34831](https://github.com/advisories/GHSA-q2ww-5357-x388) `Content-Length` mismatch in `Rack::Files` error responses.
+- [CVE-2026-34826](https://github.com/advisories/GHSA-x8cg-fq8g-mxfx) Multipart byte range processing allows denial of service via excessive overlapping ranges.
+- [CVE-2026-34830](https://github.com/advisories/GHSA-qv7j-4883-hwh7) `Rack::Sendfile` header-based `X-Accel-Mapping` regex injection enables unauthorized `X-Accel-Redirect`.
+- [CVE-2026-34785](https://github.com/advisories/GHSA-h2jq-g4cq-5ppq) `Rack::Static` prefix matching can expose unintended files under the static root.
+- [CVE-2026-34829](https://github.com/advisories/GHSA-8vqr-qjwx-82mw) Multipart parsing without `Content-Length` header allows unbounded chunked file uploads.
+
+## [2.2.22] - 2026-02-16
+
+### Security
+
+- [CVE-2026-25500](https://github.com/advisories/GHSA-whrj-4476-wvmp) XSS injection via malicious filename in `Rack::Directory`.
+- [CVE-2026-22860](https://github.com/advisories/GHSA-mxw3-3hh2-x2mh) Directory traversal via root prefix bypass in `Rack::Directory`.
+
+## [2.2.21] - 2025-11-03
+
+### Fixed
+
+- Multipart parser: limit MIME header size check to the unread buffer region to avoid false `multipart mime part header too large` errors when previously read data accumulates in the scan buffer. ([#2392](https://github.com/rack/rack/pull/2392), [@alpaca-tc](https://github.com/alpaca-tc), [@willnet](https://github.com/willnet), [@krororo](https://github.com/krororo))
+
+## [2.2.20] - 2025-10-10
+
+### Security
+
+- [CVE-2025-61780](https://github.com/advisories/GHSA-r657-rxjc-j557) Improper handling of headers in `Rack::Sendfile` may allow proxy bypass.
+- [CVE-2025-61919](https://github.com/advisories/GHSA-6xw4-3v39-52mm) Unbounded read in `Rack::Request` form parsing can lead to memory exhaustion.
+
+## [2.2.19] - 2025-10-07
+
+### Security
+
+- [CVE-2025-61772](https://github.com/advisories/GHSA-wpv5-97wm-hp9c) Multipart parser buffers unbounded per-part headers, enabling DoS (memory exhaustion)
+- [CVE-2025-61771](https://github.com/advisories/GHSA-w9pc-fmgc-vxvw) Multipart parser buffers large non‑file fields entirely in memory, enabling DoS (memory exhaustion)
+- [CVE-2025-61770](https://github.com/advisories/GHSA-p543-xpfm-54cp) Unbounded multipart preamble buffering enables DoS (memory exhaustion)
+
+## [2.2.18] - 2025-09-25
+
+### Security
+
+- [CVE-2025-59830](https://github.com/advisories/GHSA-625h-95r8-8xpm) Unbounded parameter parsing in `Rack::QueryParser` can lead to memory exhaustion via semicolon-separated parameters.
+
+## [2.2.17] - 2025-06-03
+
+- Backport `Rack::MediaType#params` now handles parameters without values. ([#2263](https://github.com/rack/rack/pull/2263), [@AllyMarthaJ](https://github.com/AllyMarthaJ))
+
 ## [2.2.16] - 2025-05-22
 
 - Fix incorrect backport of optional `CGI::Cookie` support. ([#2335](https://github.com/rack/rack/pull/2335), [@jeremyevans])
@@ -413,27 +641,29 @@ Rack v3.1 is primarily a maintenance release that removes features deprecated in
 
 ## [2.2.14] - 2025-05-06
 
+:warning: **This release includes a security fix that may cause certain routes in previously working applications to fail if query parameters exceed 4,096 in count or 4 MB in total size. See <https://github.com/rack/rack/discussions/2356> for more details.**
+
 ### Security
 
-- [CVE-2025-46727](https://github.com/rack/rack/security/advisories/GHSA-gjh7-p2fx-99vx) Unbounded parameter parsing in `Rack::QueryParser` can lead to memory exhaustion.
+- [CVE-2025-46727](https://github.com/advisories/GHSA-gjh7-p2fx-99vx) Unbounded parameter parsing in `Rack::QueryParser` can lead to memory exhaustion.
 
 ## [2.2.13] - 2025-03-11
 
 ### Security
 
-- [CVE-2025-27610](https://github.com/rack/rack/security/advisories/GHSA-7wqh-767x-r66v) Local file inclusion in `Rack::Static`.
+- [CVE-2025-27610](https://github.com/advisories/GHSA-7wqh-767x-r66v) Local file inclusion in `Rack::Static`.
 
 ## [2.2.12] - 2025-03-04
 
 ### Security
 
-- [CVE-2025-27111](https://github.com/rack/rack/security/advisories/GHSA-8cgq-6mh2-7j6v) Possible Log Injection in `Rack::Sendfile`.
+- [CVE-2025-27111](https://github.com/advisories/GHSA-8cgq-6mh2-7j6v) Possible Log Injection in `Rack::Sendfile`.
 
 ## [2.2.11] - 2025-02-12
 
 ### Security
 
-- [CVE-2025-25184](https://github.com/rack/rack/security/advisories/GHSA-7g2v-jj9q-g3rg) Possible Log Injection in `Rack::CommonLogger`.
+- [CVE-2025-25184](https://github.com/advisories/GHSA-7g2v-jj9q-g3rg) Possible Log Injection in `Rack::CommonLogger`.
 
 ## [2.2.10] - 2024-10-14
 
@@ -1200,3 +1430,4 @@ Items below this line are from the previously maintained HISTORY.md and NEWS.md 
 [@davidstosik]: https://github.com/davidstosik "David Stosik"
 [@earlopain]: https://github.com/earlopain "Earlopain"
 [@wynksaiddestroy]: https://github.com/wynksaiddestroy "Fabian Winkler"
+[@matthewd]: https://github.com/matthewd "Matthew Draper"

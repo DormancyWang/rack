@@ -92,6 +92,16 @@ describe Rack::MockResponse do
     session_cookie.expires.must_be_nil
   end
 
+  it "forwards keyword arguments from cookies to their values" do
+    value = Object.new
+    def value.fetch_value(prefix:, suffix:)
+      "#{prefix}value#{suffix}"
+    end
+
+    cookie = Rack::MockResponse::Cookie.new("value" => value)
+    cookie.fetch_value(prefix: "[", suffix: "]").must_equal "[value]"
+  end
+
   it "provides access to persistent cookies set with max-age" do
     res = Rack::MockRequest.new(app).get("")
     persistent_cookie = res.cookie("persistent_test")
@@ -229,6 +239,40 @@ describe Rack::MockResponse do
     res = Rack::MockResponse.new(200, { "transfer-encoding" => "chunked" }, body).to_a
     headers = res[1]
     refute headers.key?("content-length")
+  end
+
+  it "handles Proc bodies" do
+    headers = { "content-type" => "text/event-stream" }
+
+    body = proc do |stream|
+      stream.write("Hello, ")
+      stream.write("world!")
+    end
+
+    response = Rack::MockResponse[200, headers, body]
+
+    response.status.must_equal 200
+    response.headers.must_equal headers
+    response.body.must_equal "Hello, world!"
+  end
+
+  it "closes streaming bodies that respond to close" do
+    body = proc do |stream|
+      stream.write("content")
+    end
+
+    # Add a close method to the proc
+    def body.close
+      @closed = true
+    end
+
+    def body.closed?
+      @closed
+    end
+
+    response = Rack::MockResponse[200, {}, body]
+    response.body.must_equal "content"
+    body.must_be :closed?
   end
 end
 

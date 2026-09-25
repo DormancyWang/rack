@@ -26,6 +26,9 @@ module Rack
   # Note that despite the name, Deflater does not support the +deflate+
   # encoding.
   class Deflater
+
+    GZIP_MTIME = 0
+
     # Creates Rack::Deflater middleware. Options:
     #
     # :if :: a lambda enabling / disabling deflation based on returned boolean value
@@ -36,11 +39,19 @@ module Rack
     # :sync :: determines if the stream is going to be flushed after every chunk.  Flushing after every chunk reduces
     #          latency for time-sensitive streaming applications, but hurts compression and throughput.
     #          Defaults to +true+.
+    # :deflaters :: a hash of custom deflaters, where keys are encoding names and values are callables
+    #              that take (headers, body) and return a deflated body object. When provided, these
+    #              custom deflaters will be used if the client's accept-encoding header matches.
     def initialize(app, options = {})
       @app = app
       @condition = options[:if]
       @compressible_types = options[:include]
       @sync = options.fetch(:sync, true)
+      @deflaters = options[:deflaters]
+      @available_encodings = %w(gzip)
+      @deflaters&.each_key { |key| @available_encodings << key }
+      @available_encodings << 'identity'
+      @available_encodings.freeze
     end
 
     def call(env)
@@ -51,8 +62,7 @@ module Rack
       end
 
       request = Request.new(env)
-
-      encoding = Utils.select_best_encoding(%w(gzip identity),
+      encoding = Utils.select_best_encoding(@available_encodings,
                                             request.accept_encoding)
 
       # Set the Vary HTTP header.
@@ -65,17 +75,22 @@ module Rack
       when "gzip"
         headers['content-encoding'] = "gzip"
         headers.delete(CONTENT_LENGTH)
-        mtime = headers["last-modified"]
-        mtime = Time.httpdate(mtime).to_i if mtime
-        response[2] = GzipStream.new(body, mtime, @sync)
+        response[2] = GzipStream.new(body, GZIP_MTIME, @sync)
         response
       when "identity"
         response
-      else # when nil
-        # Only possible encoding values here are 'gzip', 'identity', and nil
-        message = "An acceptable encoding for the requested resource #{request.fullpath} could not be found."
-        bp = Rack::BodyProxy.new([message]) { body.close if body.respond_to?(:close) }
-        [406, { CONTENT_TYPE => "text/plain", CONTENT_LENGTH => message.length.to_s }, bp]
+      else
+        if deflater = @deflaters&.[](encoding)
+          headers['content-encoding'] = encoding
+          headers.delete(CONTENT_LENGTH)
+          response[2] = deflater.call(headers, body)
+          response
+        else
+          # Only possible encoding values here are 'gzip', 'identity', and nil
+          message = "An acceptable encoding for the requested resource #{request.fullpath} could not be found."
+          bp = Rack::BodyProxy.new([message]) { body.close if body.respond_to?(:close) }
+          [406, { CONTENT_TYPE => "text/plain", CONTENT_LENGTH => message.length.to_s }, bp]
+        end
       end
     end
 

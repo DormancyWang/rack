@@ -9,6 +9,7 @@ separate_testing do
   require_relative '../lib/rack/request'
   require_relative '../lib/rack/mock_request'
   require_relative '../lib/rack/lint'
+  require_relative '../lib/rack/config'
 end
 
 class RackRequestTest < Minitest::Spec
@@ -110,6 +111,20 @@ class RackRequestTest < Minitest::Spec
     refute req.has_header? 'foo'
   end
 
+  it 'can recognize a QUERY request' do
+    req = make_request(Rack::MockRequest.env_for('http://example.com:8080/', method: 'QUERY'))
+
+    req.request_method.must_equal 'QUERY'
+
+    req.must_be :query?
+    req.wont_be :get?
+    req.wont_be :post?
+    req.wont_be :put?
+    req.wont_be :delete?
+    req.wont_be :head?
+    req.wont_be :patch?
+  end
+
   it "wrap the rack variables" do
     req = make_request(Rack::MockRequest.env_for("http://example.com:8080/"))
 
@@ -123,6 +138,7 @@ class RackRequestTest < Minitest::Spec
     req.wont_be :delete?
     req.wont_be :head?
     req.wont_be :patch?
+    req.wont_be :query?
 
     req.script_name.must_equal ""
     req.path_info.must_equal "/"
@@ -148,23 +164,47 @@ class RackRequestTest < Minitest::Spec
 
     req = make_request \
       Rack::MockRequest.env_for("/", "HTTP_HOST" => "♡.com")
-    req.host.must_equal "♡.com"
-    req.hostname.must_equal "♡.com"
+    req.host.must_be_nil
+    req.hostname.must_be_nil
+
+    # Punycode conversion of ♡.com
+    req = make_request \
+      Rack::MockRequest.env_for("/", "HTTP_HOST" => "xn--c6h.com")
+    req.host.must_equal "xn--c6h.com"
+    req.hostname.must_equal "xn--c6h.com"
 
     req = make_request \
       Rack::MockRequest.env_for("/", "HTTP_HOST" => "♡.com:80")
-    req.host.must_equal "♡.com"
-    req.hostname.must_equal "♡.com"
+    req.host.must_be_nil
+    req.hostname.must_be_nil
+
+    # Punycode conversion of ♡.com:80
+    req = make_request \
+      Rack::MockRequest.env_for("/", "HTTP_HOST" => "xn--c6h.com:80")
+    req.host.must_equal "xn--c6h.com"
+    req.hostname.must_equal "xn--c6h.com"
 
     req = make_request \
       Rack::MockRequest.env_for("/", "HTTP_HOST" => "nic.谷歌")
-    req.host.must_equal "nic.谷歌"
-    req.hostname.must_equal "nic.谷歌"
+    req.host.must_be_nil
+    req.hostname.must_be_nil
+
+    # Punycode conversion of nic.谷歌
+    req = make_request \
+      Rack::MockRequest.env_for("/", "HTTP_HOST" => "nic.xn--flw351e")
+    req.host.must_equal "nic.xn--flw351e"
+    req.hostname.must_equal "nic.xn--flw351e"
 
     req = make_request \
       Rack::MockRequest.env_for("/", "HTTP_HOST" => "nic.谷歌:80")
-    req.host.must_equal "nic.谷歌"
-    req.hostname.must_equal "nic.谷歌"
+    req.host.must_be_nil
+    req.hostname.must_be_nil
+
+    # Punycode conversion of nic.谷歌:80
+    req = make_request \
+      Rack::MockRequest.env_for("/", "HTTP_HOST" => "nic.xn--flw351e:80")
+    req.host.must_equal "nic.xn--flw351e"
+    req.hostname.must_equal "nic.xn--flw351e"
 
     req = make_request \
       Rack::MockRequest.env_for("/", "HTTP_HOST" => "technically_invalid.example.com")
@@ -365,180 +405,225 @@ class RackRequestTest < Minitest::Spec
     req.port.must_equal 443
   end
 
-  it "have forwarded_* methods respect forwarded_priority" do
-    begin
-      default_priority = Rack::Request.forwarded_priority
-      default_proto_priority = Rack::Request.x_forwarded_proto_priority
+  [true, false].each do |global|
+    it "have forwarded_* methods respect forwarded_priority set #{global ? "globally" : "via rack.request.config"}" do
+      begin
+        default_priority = Rack::Request.forwarded_priority
+        default_proto_priority = Rack::Request.x_forwarded_proto_priority
 
-      def self.req(headers)
-        req = make_request Rack::MockRequest.env_for("/", headers)
-        req.singleton_class.send(:public, :forwarded_scheme)
-        req
+        define_singleton_method(:req) do |headers|
+          env = Rack::MockRequest.env_for("/", headers)
+          unless global
+            env[Rack::RACK_REQUEST_CONFIG] = {
+              forwarded_priority: @forwarded_priority,
+              x_forwarded_proto_priority: @x_forwarded_proto_priority
+            }
+          end
+          req = make_request env
+          req.singleton_class.send(:public, :forwarded_scheme)
+          req
+        end
+
+        define_singleton_method(:set_forwarded_priority) do |val|
+          if global
+            Rack::Request.forwarded_priority = val
+          else
+            @forwarded_priority = val
+          end
+        end
+
+        define_singleton_method(:set_x_forwarded_proto_priority) do |val|
+          if global
+            Rack::Request.x_forwarded_proto_priority = val
+          else
+            @x_forwarded_proto_priority = val
+          end
+        end
+
+        req("HTTP_FORWARDED"=>"for=1.2.3.4:1234",
+          "HTTP_X_FORWARDED_PORT" => "2345").
+          forwarded_port.must_equal [1234]
+
+        req("HTTP_FORWARDED"=>"for=1.2.3.4",
+          "HTTP_X_FORWARDED_PORT" => "2345").
+          forwarded_port.must_equal []
+
+        req("HTTP_FORWARDED"=>"host=1.2.3.4, host=3.4.5.6",
+          "HTTP_X_FORWARDED_HOST" => "2.3.4.5,4.5.6.7").
+          forwarded_authority.must_equal '3.4.5.6'
+
+        req("HTTP_X_FORWARDED_PROTO" => "ws",
+          "HTTP_X_FORWARDED_SCHEME" => "http").
+          forwarded_scheme.must_equal "ws"
+
+        r = req("HTTP_X_FORWARDED_PROTO" => "ws",
+          "HTTP_X_FORWARDED_SCHEME" => "http",
+          "HTTP_X_FORWARDED_SSL" => "on")
+        r.forwarded_scheme.must_equal "https"
+        r.ssl?.must_equal true
+
+        req("HTTP_X_FORWARDED_SCHEME" => "http").
+          forwarded_scheme.must_equal "http"
+
+        set_forwarded_priority([nil, :x_forwarded, :forwarded])
+
+        req("HTTP_FORWARDED"=>"for=1.2.3.4",
+          "HTTP_X_FORWARDED_FOR" => "2.3.4.5").
+          forwarded_for.must_equal ['2.3.4.5']
+
+        req("HTTP_FORWARDED"=>"for=1.2.3.4",
+          "HTTP_X_FORWARDED_PORT" => "2345").
+          forwarded_port.must_equal [2345]
+
+        req("HTTP_FORWARDED"=>"host=1.2.3.4, host=3.4.5.6",
+          "HTTP_X_FORWARDED_HOST" => "2.3.4.5,4.5.6.7").
+          forwarded_authority.must_equal '4.5.6.7'
+
+        req("HTTP_FORWARDED"=>"proto=https",
+          "HTTP_X_FORWARDED_PROTO" => "ws",
+          "HTTP_X_FORWARDED_SCHEME" => "http").
+          forwarded_scheme.must_equal "ws"
+
+        r = req("HTTP_FORWARDED"=>"proto=https",
+          "HTTP_X_FORWARDED_PROTO" => "ws",
+          "HTTP_X_FORWARDED_SCHEME" => "http",
+          "HTTP_X_FORWARDED_SSL" => "on")
+        r.forwarded_scheme.must_equal "https"
+        r.ssl?.must_equal true
+
+        req("HTTP_FORWARDED"=>"proto=https",
+          "HTTP_X_FORWARDED_SCHEME" => "http").
+          forwarded_scheme.must_equal "http"
+
+        req("HTTP_FORWARDED"=>"proto=https").
+          forwarded_scheme.must_equal "https"
+
+        set_x_forwarded_proto_priority([nil, :scheme, :proto, :ssl])
+
+        r = req("HTTP_FORWARDED"=>"proto=https",
+          "HTTP_X_FORWARDED_SSL" => "on",
+          "HTTP_X_FORWARDED_PROTO" => "ws",
+          "HTTP_X_FORWARDED_SCHEME" => "http")
+        r.forwarded_scheme.must_equal "http"
+        r.ssl?.must_equal false
+
+        req("HTTP_FORWARDED"=>"proto=https",
+          "HTTP_X_FORWARDED_PROTO" => "ws").
+          forwarded_scheme.must_equal "ws"
+
+        req("HTTP_FORWARDED"=>"proto=https").
+          forwarded_scheme.must_equal "https"
+
+        set_forwarded_priority([:x_forwarded])
+
+        r = req("HTTP_FORWARDED"=>"proto=https",
+          "HTTP_X_FORWARDED_SSL" => "on",
+          "HTTP_X_FORWARDED_PROTO" => "ws",
+          "HTTP_X_FORWARDED_SCHEME" => "http")
+        r.forwarded_scheme.must_equal "http"
+        r.ssl?.must_equal false
+
+        req("HTTP_FORWARDED"=>"proto=https",
+          "HTTP_X_FORWARDED_PROTO" => "ws").
+          forwarded_scheme.must_equal "ws"
+
+        req("HTTP_FORWARDED"=>"proto=https").
+          forwarded_scheme.must_be_nil
+
+        set_x_forwarded_proto_priority([:scheme])
+
+        req("HTTP_FORWARDED"=>"proto=https",
+          "HTTP_X_FORWARDED_SSL" => "on",
+          "HTTP_X_FORWARDED_PROTO" => "ws",
+          "HTTP_X_FORWARDED_SCHEME" => "http").
+          forwarded_scheme.must_equal "http"
+
+        req("HTTP_FORWARDED"=>"proto=https",
+          "HTTP_X_FORWARDED_PROTO" => "ws").
+          forwarded_scheme.must_be_nil
+
+        req("HTTP_FORWARDED"=>"proto=https").
+          forwarded_scheme.must_be_nil
+
+        set_x_forwarded_proto_priority([:proto])
+
+        req("HTTP_FORWARDED"=>"proto=https",
+          "HTTP_X_FORWARDED_SSL" => "on",
+          "HTTP_X_FORWARDED_PROTO" => "ws",
+          "HTTP_X_FORWARDED_SCHEME" => "http").
+          forwarded_scheme.must_equal "ws"
+
+        req("HTTP_FORWARDED"=>"proto=https",
+          "HTTP_X_FORWARDED_SCHEME" => "http").
+          forwarded_scheme.must_be_nil
+
+        req("HTTP_FORWARDED"=>"proto=https").
+          forwarded_scheme.must_be_nil
+
+        set_x_forwarded_proto_priority([])
+
+        req("HTTP_FORWARDED"=>"proto=https",
+          "HTTP_X_FORWARDED_SSL" => "on",
+          "HTTP_X_FORWARDED_PROTO" => "ws",
+          "HTTP_X_FORWARDED_SCHEME" => "http").
+          forwarded_scheme.must_be_nil
+
+        req("HTTP_FORWARDED"=>"proto=https",
+          "HTTP_X_FORWARDED_SCHEME" => "http").
+          forwarded_scheme.must_be_nil
+
+        req("HTTP_FORWARDED"=>"proto=https").
+          forwarded_scheme.must_be_nil
+
+        set_x_forwarded_proto_priority(default_proto_priority)
+        set_forwarded_priority([:forwarded])
+
+        req("HTTP_FORWARDED"=>"proto=https",
+          "HTTP_X_FORWARDED_PROTO" => "ws",
+          "HTTP_X_FORWARDED_SCHEME" => "http").
+          forwarded_scheme.must_equal 'https'
+
+        req("HTTP_X_FORWARDED_PROTO" => "ws",
+          "HTTP_X_FORWARDED_SCHEME" => "http").
+          forwarded_scheme.must_be_nil
+
+        req("HTTP_X_FORWARDED_PROTO" => "ws").
+          forwarded_scheme.must_be_nil
+
+        set_forwarded_priority([])
+
+        req("HTTP_FORWARDED"=>"for=1.2.3.4",
+          "HTTP_X_FORWARDED_FOR" => "2.3.4.5").
+          forwarded_for.must_be_nil
+
+        req("HTTP_FORWARDED"=>"for=1.2.3.4",
+          "HTTP_X_FORWARDED_PORT" => "2345").
+          forwarded_port.must_be_nil
+
+        req("HTTP_FORWARDED"=>"host=1.2.3.4, host=3.4.5.6",
+          "HTTP_X_FORWARDED_HOST" => "2.3.4.5,4.5.6.7").
+          forwarded_authority.must_be_nil
+
+        r = req("HTTP_FORWARDED"=>"proto=https",
+          "HTTP_X_FORWARDED_SSL" => "on",
+          "HTTP_X_FORWARDED_PROTO" => "ws",
+          "HTTP_X_FORWARDED_SCHEME" => "http")
+        r.forwarded_scheme.must_be_nil
+        r.ssl?.must_equal false
+
+        req("HTTP_FORWARDED"=>"proto=https",
+          "HTTP_X_FORWARDED_SCHEME" => "http").
+          forwarded_scheme.must_be_nil
+
+        req("HTTP_FORWARDED"=>"proto=https").
+          forwarded_scheme.must_be_nil
+
+      ensure
+        if global
+          Rack::Request.forwarded_priority = default_priority
+          Rack::Request.x_forwarded_proto_priority = default_proto_priority
+        end
       end
-
-      req("HTTP_FORWARDED"=>"for=1.2.3.4",
-        "HTTP_X_FORWARDED_FOR" => "2.3.4.5").
-        forwarded_for.must_equal ['1.2.3.4']
-
-      req("HTTP_FORWARDED"=>"for=1.2.3.4:1234",
-        "HTTP_X_FORWARDED_PORT" => "2345").
-        forwarded_port.must_equal [1234]
-
-      req("HTTP_FORWARDED"=>"for=1.2.3.4",
-        "HTTP_X_FORWARDED_PORT" => "2345").
-        forwarded_port.must_equal []
-
-      req("HTTP_FORWARDED"=>"host=1.2.3.4, host=3.4.5.6",
-        "HTTP_X_FORWARDED_HOST" => "2.3.4.5,4.5.6.7").
-        forwarded_authority.must_equal '3.4.5.6'
-
-      req("HTTP_X_FORWARDED_PROTO" => "ws",
-        "HTTP_X_FORWARDED_SCHEME" => "http").
-        forwarded_scheme.must_equal "ws"
-
-      req("HTTP_X_FORWARDED_SCHEME" => "http").
-        forwarded_scheme.must_equal "http"
-
-      Rack::Request.forwarded_priority = [nil, :x_forwarded, :forwarded]
-
-      req("HTTP_FORWARDED"=>"for=1.2.3.4",
-        "HTTP_X_FORWARDED_FOR" => "2.3.4.5").
-        forwarded_for.must_equal ['2.3.4.5']
-
-      req("HTTP_FORWARDED"=>"for=1.2.3.4",
-        "HTTP_X_FORWARDED_PORT" => "2345").
-        forwarded_port.must_equal [2345]
-
-      req("HTTP_FORWARDED"=>"host=1.2.3.4, host=3.4.5.6",
-        "HTTP_X_FORWARDED_HOST" => "2.3.4.5,4.5.6.7").
-        forwarded_authority.must_equal '4.5.6.7'
-
-      req("HTTP_FORWARDED"=>"proto=https",
-        "HTTP_X_FORWARDED_PROTO" => "ws",
-        "HTTP_X_FORWARDED_SCHEME" => "http").
-        forwarded_scheme.must_equal "ws"
-
-      req("HTTP_FORWARDED"=>"proto=https",
-        "HTTP_X_FORWARDED_SCHEME" => "http").
-        forwarded_scheme.must_equal "http"
-
-      req("HTTP_FORWARDED"=>"proto=https").
-        forwarded_scheme.must_equal "https"
-
-      Rack::Request.x_forwarded_proto_priority = [nil, :scheme, :proto]
-
-      req("HTTP_FORWARDED"=>"proto=https",
-        "HTTP_X_FORWARDED_PROTO" => "ws",
-        "HTTP_X_FORWARDED_SCHEME" => "http").
-        forwarded_scheme.must_equal "http"
-
-      req("HTTP_FORWARDED"=>"proto=https",
-        "HTTP_X_FORWARDED_PROTO" => "ws").
-        forwarded_scheme.must_equal "ws"
-
-      req("HTTP_FORWARDED"=>"proto=https").
-        forwarded_scheme.must_equal "https"
-
-      Rack::Request.forwarded_priority = [:x_forwarded]
-
-      req("HTTP_FORWARDED"=>"proto=https",
-        "HTTP_X_FORWARDED_PROTO" => "ws",
-        "HTTP_X_FORWARDED_SCHEME" => "http").
-        forwarded_scheme.must_equal "http"
-
-      req("HTTP_FORWARDED"=>"proto=https",
-        "HTTP_X_FORWARDED_PROTO" => "ws").
-        forwarded_scheme.must_equal "ws"
-
-      req("HTTP_FORWARDED"=>"proto=https").
-        forwarded_scheme.must_be_nil
-
-      Rack::Request.x_forwarded_proto_priority = [:scheme]
-
-      req("HTTP_FORWARDED"=>"proto=https",
-        "HTTP_X_FORWARDED_PROTO" => "ws",
-        "HTTP_X_FORWARDED_SCHEME" => "http").
-        forwarded_scheme.must_equal "http"
-
-      req("HTTP_FORWARDED"=>"proto=https",
-        "HTTP_X_FORWARDED_PROTO" => "ws").
-        forwarded_scheme.must_be_nil
-
-      req("HTTP_FORWARDED"=>"proto=https").
-        forwarded_scheme.must_be_nil
-
-      Rack::Request.x_forwarded_proto_priority = [:proto]
-
-      req("HTTP_FORWARDED"=>"proto=https",
-        "HTTP_X_FORWARDED_PROTO" => "ws",
-        "HTTP_X_FORWARDED_SCHEME" => "http").
-        forwarded_scheme.must_equal "ws"
-
-      req("HTTP_FORWARDED"=>"proto=https",
-        "HTTP_X_FORWARDED_SCHEME" => "http").
-        forwarded_scheme.must_be_nil
-
-      req("HTTP_FORWARDED"=>"proto=https").
-        forwarded_scheme.must_be_nil
-
-      Rack::Request.x_forwarded_proto_priority = []
-
-      req("HTTP_FORWARDED"=>"proto=https",
-        "HTTP_X_FORWARDED_PROTO" => "ws",
-        "HTTP_X_FORWARDED_SCHEME" => "http").
-        forwarded_scheme.must_be_nil
-
-      req("HTTP_FORWARDED"=>"proto=https",
-        "HTTP_X_FORWARDED_SCHEME" => "http").
-        forwarded_scheme.must_be_nil
-
-      req("HTTP_FORWARDED"=>"proto=https").
-        forwarded_scheme.must_be_nil
-
-      Rack::Request.x_forwarded_proto_priority = default_proto_priority
-      Rack::Request.forwarded_priority = [:forwarded]
-
-      req("HTTP_FORWARDED"=>"proto=https",
-        "HTTP_X_FORWARDED_PROTO" => "ws",
-        "HTTP_X_FORWARDED_SCHEME" => "http").
-        forwarded_scheme.must_equal 'https'
-
-      req("HTTP_X_FORWARDED_PROTO" => "ws",
-        "HTTP_X_FORWARDED_SCHEME" => "http").
-        forwarded_scheme.must_be_nil
-
-      req("HTTP_X_FORWARDED_PROTO" => "ws").
-        forwarded_scheme.must_be_nil
-
-      Rack::Request.forwarded_priority = []
-
-      req("HTTP_FORWARDED"=>"for=1.2.3.4",
-        "HTTP_X_FORWARDED_FOR" => "2.3.4.5").
-        forwarded_for.must_be_nil
-
-      req("HTTP_FORWARDED"=>"for=1.2.3.4",
-        "HTTP_X_FORWARDED_PORT" => "2345").
-        forwarded_port.must_be_nil
-
-      req("HTTP_FORWARDED"=>"host=1.2.3.4, host=3.4.5.6",
-        "HTTP_X_FORWARDED_HOST" => "2.3.4.5,4.5.6.7").
-        forwarded_authority.must_be_nil
-
-      req("HTTP_FORWARDED"=>"proto=https",
-        "HTTP_X_FORWARDED_PROTO" => "ws",
-        "HTTP_X_FORWARDED_SCHEME" => "http").
-        forwarded_scheme.must_be_nil
-
-      req("HTTP_FORWARDED"=>"proto=https",
-        "HTTP_X_FORWARDED_SCHEME" => "http").
-        forwarded_scheme.must_be_nil
-
-      req("HTTP_FORWARDED"=>"proto=https").
-        forwarded_scheme.must_be_nil
-
-    ensure
-      Rack::Request.forwarded_priority = default_priority
-      Rack::Request.x_forwarded_proto_priority = default_proto_priority
     end
   end
 
@@ -619,19 +704,28 @@ class RackRequestTest < Minitest::Spec
     req.params.must_equal req.GET.merge(req.POST)
   end
 
-  it "should use the query_parser for query parsing" do
+  it "should use the query_parser set via attr_writer for query parsing" do
     c = Class.new(Rack::QueryParser::Params) do
       def initialize(*)
         super(){|h, k| h[k.to_s] if k.is_a?(Symbol)}
       end
     end
-    parser = Rack::QueryParser.new(c, 100)
-    c = Class.new(Rack::Request) do
-      define_method(:query_parser) do
-        parser
+    req = Rack::Request.new(Rack::MockRequest.env_for("/?foo=bar&quux=bla"))
+    req.query_parser = Rack::QueryParser.new(c, 100)
+    req.GET[:foo].must_equal "bar"
+    req.GET[:quux].must_equal "bla"
+    req.params[:foo].must_equal "bar"
+    req.params[:quux].must_equal "bla"
+  end
+
+  it "should use the query_parser from environment for query parsing" do
+    c = Class.new(Rack::QueryParser::Params) do
+      def initialize(*)
+        super(){|h, k| h[k.to_s] if k.is_a?(Symbol)}
       end
     end
-    req = c.new(Rack::MockRequest.env_for("/?foo=bar&quux=bla"))
+    req = Rack::Request.new(Rack::MockRequest.env_for("/?foo=bar&quux=bla"))
+    req.env[Rack::RACK_REQUEST_CONFIG] = {query_parser: Rack::QueryParser.new(c, 100)}
     req.GET[:foo].must_equal "bar"
     req.GET[:quux].must_equal "bla"
     req.params[:foo].must_equal "bar"
@@ -800,6 +894,239 @@ class RackRequestTest < Minitest::Spec
     req.POST.must_equal "foo" => "bar", "quux" => "bla"
   end
 
+  it "limit POST body read to bytesize_limit when parsing url-encoded data" do
+    # Create a mock input that tracks read calls
+    reads = []
+    mock_input = Object.new
+    mock_input.define_singleton_method(:read) do |len=nil|
+      reads << len
+      # Return mutable string
+      "foo=bar".dup
+    end
+
+    request = make_request \
+      Rack::MockRequest.env_for("/",
+        'REQUEST_METHOD' => 'POST',
+        'CONTENT_TYPE' => 'application/x-www-form-urlencoded',
+        'rack.input' => mock_input)
+
+    request.POST.must_equal "foo" => "bar"
+
+    # Verify read was called with a limit (bytesize_limit + 2), not nil
+    reads.size.must_equal 1
+    reads.first.wont_be_nil
+    reads.first.must_equal(request.send(:query_parser).bytesize_limit + 2)
+  end
+
+  it "read POST body without a length limit when bytesize_limit is nil" do
+    # Create a mock input that tracks read calls
+    reads = []
+    mock_input = Object.new
+    mock_input.define_singleton_method(:read) do |len=nil|
+      reads << len
+      # Return mutable string
+      "foo=bar".dup
+    end
+
+    request = make_request \
+      Rack::MockRequest.env_for("/",
+        'REQUEST_METHOD' => 'POST',
+        'CONTENT_TYPE' => 'application/x-www-form-urlencoded',
+        'rack.input' => mock_input)
+    request.define_singleton_method(:query_parser) do
+      Rack::QueryParser.make_default(Rack::Utils.param_depth_limit, bytesize_limit: nil)
+    end
+
+    request.POST.must_equal "foo" => "bar"
+
+    # Verify read was called without a limit (nil), since bytesize_limit is nil
+    reads.size.must_equal 1
+    assert_nil reads.first
+  end
+
+  it "handle nil return from rack.input.read when parsing url-encoded data" do
+    # Simulate an input that returns nil on read
+    mock_input = Object.new
+    mock_input.define_singleton_method(:read) do |len=nil|
+      nil
+    end
+
+    request = make_request \
+      Rack::MockRequest.env_for("/",
+        'REQUEST_METHOD' => 'POST',
+        'CONTENT_TYPE' => 'application/x-www-form-urlencoded',
+        'rack.input' => mock_input)
+
+    # Should handle nil gracefully and return empty hash
+    request.POST.must_equal({})
+  end
+
+  it "truncate POST body at bytesize_limit when parsing url-encoded data" do
+    # Create input larger than limit
+    large_body = "a=1&" * 1000000  # Very large body
+
+    request = make_request \
+      Rack::MockRequest.env_for("/",
+        'REQUEST_METHOD' => 'POST',
+        'CONTENT_TYPE' => 'application/x-www-form-urlencoded',
+        :input => large_body)
+
+    # Should parse only up to the limit without reading entire body into memory
+    # The actual parsing may fail due to size limit, which is expected
+    proc { request.POST }.must_raise Rack::QueryParser::QueryLimitError
+  end
+
+  it "clean up Safari's ajax POST body with limited read" do
+    # Verify Safari null-byte cleanup still works with bounded read
+    reads = []
+    mock_input = Object.new
+    mock_input.define_singleton_method(:read) do |len=nil|
+      reads << len
+      # Return mutable string (dup ensures it's not frozen)
+      "foo=bar\0".dup
+    end
+
+    request = make_request \
+      Rack::MockRequest.env_for("/",
+        'REQUEST_METHOD' => 'POST',
+        'CONTENT_TYPE' => 'application/x-www-form-urlencoded',
+        'rack.input' => mock_input)
+
+    request.POST.must_equal "foo" => "bar"
+
+    # Verify bounded read was used
+    reads.first.wont_be_nil
+  end
+
+  it "return form_pairs for url-encoded POST data" do
+    req = make_request \
+      Rack::MockRequest.env_for("/",
+        'REQUEST_METHOD' => 'POST', :input => "foo=bar&quux=bla")
+    req.form_pairs.must_equal [["foo", "bar"], ["quux", "bla"]]
+  end
+
+  it "preserve duplicate keys in form_pairs" do
+    req = make_request \
+      Rack::MockRequest.env_for("/",
+        'REQUEST_METHOD' => 'POST', :input => "foo=1&foo=2&bar=3")
+    req.form_pairs.must_equal [["foo", "1"], ["foo", "2"], ["bar", "3"]]
+  end
+
+  it "handle empty values in form_pairs" do
+    req = make_request \
+      Rack::MockRequest.env_for("/",
+        'REQUEST_METHOD' => 'POST', :input => "foo=&bar=baz&empty")
+    req.form_pairs.must_equal [["foo", ""], ["bar", "baz"], ["empty", nil]]
+  end
+
+  it "return empty array for form_pairs with no POST data" do
+    req = make_request \
+      Rack::MockRequest.env_for("/", 'REQUEST_METHOD' => 'POST', :input => "")
+    req.form_pairs.must_equal []
+  end
+
+  it "return empty array for form_pairs with non-form content type" do
+    req = make_request \
+      Rack::MockRequest.env_for("/",
+        'REQUEST_METHOD' => 'POST',
+        "CONTENT_TYPE" => 'text/plain',
+        :input => "foo=bar")
+    req.form_pairs.must_equal []
+  end
+
+  it "raise same error for form_pairs as POST with invalid encoding" do
+    req = make_request \
+      Rack::MockRequest.env_for("/",
+        'REQUEST_METHOD' => 'POST', :input => "a%=1")
+    lambda { req.form_pairs }.must_raise(Rack::Utils::InvalidParameterError).
+      message.must_equal "invalid %-encoding (a%)"
+  end
+
+  it "return form_pairs for multipart form data" do
+    input = <<EOF
+--AaB03x\r
+content-disposition: form-data; name="reply"\r
+\r
+yes\r
+--AaB03x\r
+content-disposition: form-data; name="name"\r
+\r
+John\r
+--AaB03x--\r
+EOF
+    req = make_request Rack::MockRequest.env_for("/",
+                      "CONTENT_TYPE" => "multipart/form-data; boundary=AaB03x",
+                      "CONTENT_LENGTH" => input.size,
+                      :input => input)
+
+    pairs = req.form_pairs
+    pairs.must_equal [["reply", "yes"], ["name", "John"]]
+  end
+
+  it "preserve duplicate keys in multipart form_pairs" do
+    input = <<EOF
+--AaB03x\r
+content-disposition: form-data; name="item"\r
+\r
+first\r
+--AaB03x\r
+content-disposition: form-data; name="item"\r
+\r
+second\r
+--AaB03x\r
+content-disposition: form-data; name="other"\r
+\r
+value\r
+--AaB03x--\r
+EOF
+    req = make_request Rack::MockRequest.env_for("/",
+                      "CONTENT_TYPE" => "multipart/form-data; boundary=AaB03x",
+                      "CONTENT_LENGTH" => input.size,
+                      :input => input)
+
+    pairs = req.form_pairs
+    pairs.must_equal [["item", "first"], ["item", "second"], ["other", "value"]]
+  end
+
+  it "include file uploads in multipart form_pairs" do
+    input = <<EOF
+--AaB03x\r
+content-disposition: form-data; name="reply"\r
+\r
+yes\r
+--AaB03x\r
+content-disposition: form-data; name="fileupload"; filename="test.txt"\r
+content-type: text/plain\r
+\r
+file content\r
+--AaB03x--\r
+EOF
+    req = make_request Rack::MockRequest.env_for("/",
+                      "CONTENT_TYPE" => "multipart/form-data; boundary=AaB03x",
+                      "CONTENT_LENGTH" => input.size,
+                      :input => input)
+
+    pairs = req.form_pairs
+    pairs.length.must_equal 2
+    pairs[0].must_equal ["reply", "yes"]
+    pairs[1][0].must_equal "fileupload"
+    pairs[1][1].must_be_kind_of Hash
+    pairs[1][1][:filename].must_equal "test.txt"
+    pairs[1][1][:type].must_equal "text/plain"
+  end
+
+  it "return empty array for empty multipart form_pairs" do
+    input = <<EOF
+--AaB03x--\r
+EOF
+    req = make_request Rack::MockRequest.env_for("/",
+                      "CONTENT_TYPE" => "multipart/form-data; boundary=AaB03x",
+                      "CONTENT_LENGTH" => input.size,
+                      :input => input)
+
+    req.form_pairs.must_equal []
+  end
+
   it "extract referrer correctly" do
     req = make_request \
       Rack::MockRequest.env_for("/", "HTTP_REFERER" => "/some/path")
@@ -845,6 +1172,15 @@ class RackRequestTest < Minitest::Spec
     req = make_request \
       Rack::MockRequest.env_for("", "HTTP_X_REQUESTED_WITH" => "XMLHttpRequest")
     req.must_be :xhr?
+  end
+
+  it "figure out if prefetch request" do
+    req = make_request(Rack::MockRequest.env_for(""))
+    req.wont_be :prefetch?
+
+    req = make_request \
+      Rack::MockRequest.env_for("", "HTTP_SEC_PURPOSE" => "prefetch")
+    req.must_be :prefetch?
   end
 
   it "ssl detection" do
@@ -1044,6 +1380,147 @@ class RackRequestTest < Minitest::Spec
     req1.params.must_equal({})
     req2 = make_request(e)
     req2.params.must_equal({})
+  end
+
+  it "allows access to specific HTTP header via headers[]" do
+    e = Rack::MockRequest.env_for("",
+      "HTTP_FOO_BAR" => "baz",
+      "CONTENT_LENGTH" => "1",
+      "CONTENT_TYPE" => "text/html")
+    req = make_request(e)
+
+    req.headers['foo-bar'].must_equal 'baz'
+    req.headers['FOO-BAR'].must_equal 'baz'
+    req.headers['content-type'].must_equal 'text/html'
+    req.headers['Content-Length'].must_equal '1'
+    req.headers['bar-foo'].must_be_nil
+  end
+
+  it "allows access to specific HTTP header via headers.fetch" do
+    e = Rack::MockRequest.env_for("",
+      "HTTP_FOO_BAR" => "baz",
+      "CONTENT_LENGTH" => "1",
+      "CONTENT_TYPE" => "text/html")
+    req = make_request(e)
+
+    req.headers.fetch('foo-bar').must_equal 'baz'
+    req.headers.fetch('FOO-BAR').must_equal 'baz'
+    req.headers.fetch('content-type').must_equal 'text/html'
+    req.headers.fetch('Content-Length').must_equal '1'
+
+    proc{req.headers.fetch('bar-foo')}.must_raise KeyError
+    req.headers.fetch('bar-foo'){'1'}.must_equal '1'
+  end
+
+  it "allows checking for specific HTTP header via headers.has_key?" do
+    e = Rack::MockRequest.env_for("",
+      "HTTP_FOO_BAR" => "baz",
+      "CONTENT_LENGTH" => "1",
+      "CONTENT_TYPE" => "text/html")
+    req = make_request(e)
+
+    req.headers.has_key?('foo-bar').must_equal true
+    req.headers.has_key?('FOO-BAR').must_equal true
+    req.headers.has_key?('content-type').must_equal true
+    req.headers.has_key?('Content-Length').must_equal true
+    req.headers.has_key?('bar-foo').must_equal false
+  end
+
+  it "allows deleting specific HTTP header via headers.delete" do
+    e = Rack::MockRequest.env_for("",
+      "HTTP_FOO_BAR" => "baz",
+      "CONTENT_LENGTH" => "1",
+      "CONTENT_TYPE" => "text/html")
+    req = make_request(e)
+
+    req.headers.delete('foo-bar').must_equal 'baz'
+    req.headers.delete('content-type').must_equal 'text/html'
+    req.headers.delete('Content-Length').must_equal '1'
+    req.headers.delete('bar-foo').must_be_nil
+
+    e.has_key?("HTTP_FOO_BAR").must_equal false
+    e.has_key?("CONTENT_LENGTH").must_equal false
+    e.has_key?("CONTENT_TYPE").must_equal false
+
+    req.headers.has_key?('foo-bar').must_equal false
+    req.headers.has_key?('content-type').must_equal false
+    req.headers.has_key?('Content-Length').must_equal false
+  end
+
+  it "set HTTP header in env via headers[]=" do
+    e = Rack::MockRequest.env_for("",
+      "CONTENT_LENGTH" => "12",
+      "CONTENT_TYPE" => "text/plain")
+    req = make_request(e)
+
+    req.headers['foo-bar'] = 'baz'
+    req.headers['Content-Type'] = 'text/html'
+    req.headers['content-length'] = '1'
+
+    e['HTTP_FOO_BAR'].must_equal 'baz'
+    e['CONTENT_TYPE'].must_equal 'text/html'
+    e['CONTENT_LENGTH'].must_equal '1'
+
+    req.headers['foo-bar'].must_equal 'baz'
+    req.headers['FOO-BAR'].must_equal 'baz'
+    req.headers['content-type'].must_equal 'text/html'
+    req.headers['Content-Length'].must_equal '1'
+  end
+
+  it "set or add HTTP header in env via headers.add" do
+    e = Rack::MockRequest.env_for("",
+      "CONTENT_LENGTH" => "12",
+      "CONTENT_TYPE" => "text/plain")
+    req = make_request(e)
+
+    req.headers.add('foo-bar', 'baz').must_equal 'baz'
+    req.headers.add('Content-Type', 'text/html').must_equal %w'text/plain text/html'
+    req.headers.add('content-length', '1').must_equal %w'12 1'
+
+    e['HTTP_FOO_BAR'].must_equal 'baz'
+    e['CONTENT_TYPE'].must_equal %w'text/plain text/html'
+    e['CONTENT_LENGTH'].must_equal %w'12 1'
+
+    req.headers.add('foo-bar', 'baz2').must_equal %w'baz baz2'
+    req.headers.add('Content-Type', 'text/html2').must_equal %w'text/plain text/html text/html2'
+    req.headers.add('content-length', '13').must_equal %w'12 1 13'
+
+    e['HTTP_FOO_BAR'].must_equal %w'baz baz2'
+    e['CONTENT_TYPE'].must_equal %w'text/plain text/html text/html2'
+    e['CONTENT_LENGTH'].must_equal %w'12 1 13'
+
+    req.headers['foo-bar'].must_equal %w'baz baz2'
+    req.headers['content-type'].must_equal %w'text/plain text/html text/html2'
+    req.headers['Content-Length'].must_equal %w'12 1 13'
+  end
+
+  it "allows iterating over HTTP headers via headers.each" do
+    e = Rack::MockRequest.env_for("",
+      "CONTENT_LENGTH" => "1",
+      "CONTENT_TYPE" => "text/html",
+      "HTTP_FOO_BAR" => "baz")
+    req = make_request(e)
+
+    a = req.headers.each
+    a.to_a.must_equal [
+      ['content-length', '1'],
+      ['content-type', 'text/html'],
+      ['foo-bar', 'baz'],
+    ]
+  end
+
+  it "allows retrieving a hash of HTTP headers via headers.to_h" do
+    e = Rack::MockRequest.env_for("",
+      "CONTENT_LENGTH" => "1",
+      "CONTENT_TYPE" => "text/html",
+      "HTTP_FOO_BAR" => "baz")
+    req = make_request(e)
+
+    req.headers.to_h.must_equal(
+      'content-length' => '1',
+      'content-type' => 'text/html',
+      'foo-bar' => 'baz',
+    )
   end
 
   it "pass through non-uri escaped cookies as-is" do
@@ -1789,6 +2266,127 @@ EOF
     req.trusted_proxy?("2001:470:1f0b:18f8::1").must_equal false
   end
 
+  it "uses rack.request.trusted_proxy env key when set to nil (default behavior)" do
+    # When nil, should fall back to ip_filter
+    env = Rack::MockRequest.env_for("/")
+    env[Rack::RACK_REQUEST_CONFIG] = {trusted_proxy: nil}
+    req = make_request(env)
+    
+    req.trusted_proxy?('127.0.0.1').must_equal true
+    req.trusted_proxy?('10.0.0.1').must_equal true
+    req.trusted_proxy?('192.168.1.1').must_equal true
+    req.trusted_proxy?('1.2.3.4').must_equal false
+  end
+
+  it "trusts all proxies when rack.request.trusted_proxy is true" do
+    env = Rack::MockRequest.env_for("/")
+    env[Rack::RACK_REQUEST_CONFIG] = {trusted_proxy: true}
+    req = make_request(env)
+    
+    req.trusted_proxy?('127.0.0.1').must_equal true
+    req.trusted_proxy?('1.2.3.4').must_equal true
+    req.trusted_proxy?('8.8.8.8').must_equal true
+    req.trusted_proxy?('2001:470:1f0b:18f8::1').must_equal true
+  end
+
+  it "trusts no proxies when rack.request.trusted_proxy is false" do
+    env = Rack::MockRequest.env_for("/")
+    env[Rack::RACK_REQUEST_CONFIG] = {trusted_proxy: false}
+    req = make_request(env)
+    
+    req.trusted_proxy?('127.0.0.1').must_equal false
+    req.trusted_proxy?('10.0.0.1').must_equal false
+    req.trusted_proxy?('192.168.1.1').must_equal false
+    req.trusted_proxy?('1.2.3.4').must_equal false
+  end
+
+  it "trusts only specified IPs when rack.request.trusted_proxy is a callable" do
+    env = Rack::MockRequest.env_for("/")
+    env[Rack::RACK_REQUEST_CONFIG] = {trusted_proxy: lambda { |ip| ['10.0.0.1', '192.168.1.100'].include?(ip) }}
+    req = make_request(env)
+    
+    req.trusted_proxy?('10.0.0.1').must_equal true
+    req.trusted_proxy?('192.168.1.100').must_equal true
+    req.trusted_proxy?('10.0.0.2').must_equal false
+    req.trusted_proxy?('192.168.1.101').must_equal false
+    req.trusted_proxy?('127.0.0.1').must_equal false
+  end
+
+  it "supports CIDR ranges in rack.request.trusted_proxy callable" do
+    require 'ipaddr'
+    env = Rack::MockRequest.env_for("/")
+    ranges = [IPAddr.new('10.0.0.0/24'), IPAddr.new('192.168.1.0/28')]
+    env[Rack::RACK_REQUEST_CONFIG] = {
+      trusted_proxy: lambda { |ip|
+        begin
+          ip_addr = IPAddr.new(ip)
+          ranges.any? { |range| range.include?(ip_addr) }
+        rescue IPAddr::InvalidAddressError
+          false
+        end
+      }
+    }
+    req = make_request(env)
+    
+    # 10.0.0.0/24 covers 10.0.0.0 - 10.0.0.255
+    req.trusted_proxy?('10.0.0.1').must_equal true
+    req.trusted_proxy?('10.0.0.100').must_equal true
+    req.trusted_proxy?('10.0.0.255').must_equal true
+    req.trusted_proxy?('10.0.1.1').must_equal false
+    
+    # 192.168.1.0/28 covers 192.168.1.0 - 192.168.1.15
+    req.trusted_proxy?('192.168.1.5').must_equal true
+    req.trusted_proxy?('192.168.1.15').must_equal true
+    req.trusted_proxy?('192.168.1.16').must_equal false
+  end
+
+  it "supports IPv6 addresses in rack.request.trusted_proxy callable" do
+    require 'ipaddr'
+    env = Rack::MockRequest.env_for("/")
+    ipv6_exact = IPAddr.new('2001:db8::1')
+    ipv6_range = IPAddr.new('fd00::/8')
+    env[Rack::RACK_REQUEST_CONFIG] = {
+      trusted_proxy: lambda { |ip|
+        begin
+          ip_addr = IPAddr.new(ip)
+          ip_addr == ipv6_exact || ipv6_range.include?(ip_addr)
+        rescue IPAddr::InvalidAddressError
+          false
+        end
+      }
+    }
+    req = make_request(env)
+    
+    req.trusted_proxy?('2001:db8::1').must_equal true
+    req.trusted_proxy?('2001:db8::2').must_equal false
+    req.trusted_proxy?('fd00::1').must_equal true
+    req.trusted_proxy?('fd00::ffff').must_equal true
+    req.trusted_proxy?('fe00::1').must_equal false
+  end
+
+  it "handles custom logic in rack.request.trusted_proxy callable" do
+    env = Rack::MockRequest.env_for("/")
+    env[Rack::RACK_REQUEST_CONFIG] = {
+      trusted_proxy: lambda { |ip| ip == '10.0.0.1' || ip == 'invalid-ip' }
+    }
+    req = make_request(env)
+    
+    req.trusted_proxy?('10.0.0.1').must_equal true
+    req.trusted_proxy?('invalid-ip').must_equal true
+    req.trusted_proxy?('192.168.1.1').must_equal false
+  end
+
+  it "can use Rack::Config to set rack.request.config" do
+    app = lambda { |env| [200, {}, [Rack::Request.new(env).trusted_proxy?('8.8.8.8').to_s]] }
+    config_app = Rack::Config.new(app) do |env|
+      env[Rack::RACK_REQUEST_CONFIG] = { trusted_proxy: true }
+    end
+    
+    mock = Rack::MockRequest.new(config_app)
+    res = mock.get '/'
+    res.body.must_equal 'true'
+  end
+
   it "sets the default session to an empty hash" do
     req = make_request(Rack::MockRequest.env_for("http://example.com:8080/"))
     session = req.session
@@ -1894,7 +2492,7 @@ EOF
       extend Forwardable
 
       def_delegators :@req, :env, :has_header?, :get_header, :fetch_header,
-        :each_header, :set_header, :add_header, :delete_header
+        :each_header, :set_header, :add_header, :delete_header, :headers
 
       def_delegators :@req, :[], :[]=
 

@@ -15,9 +15,14 @@ module Rack
   # be passed to the specified +app+.
   #
   # If +app+ is not specified, a Rack::Files of the same +root+ will be used.
+  #
+  # Be aware that just like the default behavior of most webservers, Rack::Directory
+  # will follow symbolic links encountered under the root. If a symlink points to
+  # a location outside of the root, that target will still be served as part of
+  # the response.
 
   class Directory
-    DIR_FILE = "<tr><td class='name'><a href='%s'>%s</a></td><td class='size'>%s</td><td class='type'>%s</td><td class='mtime'>%s</td></tr>\n"
+    DIR_FILE = "<tr><td class='name'><a href='./%s'>%s</a></td><td class='size'>%s</td><td class='type'>%s</td><td class='mtime'>%s</td></tr>\n"
     DIR_PAGE_HEADER = <<-PAGE
 <html><head>
   <title>%s</title>
@@ -51,7 +56,7 @@ table { width:100%%; }
     class DirectoryBody < Struct.new(:root, :path, :files)
       # Yield strings for each part of the directory entry
       def each
-        show_path = Utils.escape_html(path.sub(/^#{root}/, ''))
+        show_path = Utils.escape_html(path.sub(/\A#{Regexp.escape(root)}/, ''))
         yield(DIR_PAGE_HEADER % [ show_path, show_path ])
 
         unless path.chomp('/') == root
@@ -82,6 +87,7 @@ table { width:100%%; }
     # Set the root directory and application for serving files.
     def initialize(root, app = nil)
       @root = ::File.expand_path(root)
+      @root_with_separator = @root.end_with?(::File::SEPARATOR) ? @root : "#{@root}#{::File::SEPARATOR}"
       @app = app || Files.new(@root)
       @head = Head.new(method(:get))
     end
@@ -118,7 +124,9 @@ table { width:100%%; }
     # Rack response to use for requests with paths outside the root, or nil if path is inside the root.
     def check_forbidden(path_info)
       return unless path_info.include? ".."
-      return if ::File.expand_path(::File.join(@root, path_info)).start_with?(@root)
+
+      expanded_path = ::File.expand_path(::File.join(@root, path_info))
+      return if expanded_path == @root || expanded_path.start_with?(@root_with_separator)
 
       body = "Forbidden\n"
       [403, { CONTENT_TYPE => "text/plain",

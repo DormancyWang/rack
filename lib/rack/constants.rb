@@ -36,6 +36,7 @@ module Rack
   LINK    = 'LINK'
   UNLINK  = 'UNLINK'
   TRACE   = 'TRACE'
+  QUERY   = 'QUERY'
 
   # Rack environment variables
   RACK_VERSION                        = 'rack.version'
@@ -55,6 +56,7 @@ module Rack
   RACK_MULTIPART_TEMPFILE_FACTORY     = 'rack.multipart.tempfile_factory'
   RACK_RESPONSE_FINISHED              = 'rack.response_finished'
   RACK_PROTOCOL                       = 'rack.protocol'
+  RACK_REQUEST_CONFIG                 = 'rack.request.config'
   RACK_REQUEST_FORM_INPUT             = 'rack.request.form_input'
   RACK_REQUEST_FORM_HASH              = 'rack.request.form_hash'
   RACK_REQUEST_FORM_PAIRS             = 'rack.request.form_pairs'

@@ -39,6 +39,31 @@ describe Rack::Builder do
     builder.options[:foo].must_equal :bar
   end
 
+  it "forwards positional hashes and keyword arguments to middleware" do
+    middleware = Class.new do
+      class << self
+        attr_accessor :arguments
+      end
+
+      def initialize(app, options, keyword:)
+        self.class.arguments = [options, keyword]
+        @app = app
+      end
+
+      def call(env)
+        @app.call(env)
+      end
+    end
+
+    app = builder_to_app do
+      use middleware, {}, keyword: true
+      run lambda { |env| [200, { "content-type" => "text/plain" }, ["OK"]] }
+    end
+
+    Rack::MockRequest.new(app).get("/")
+    middleware.arguments.must_equal([{}, true])
+  end
+
   it "supports run with block" do
     app = builder_to_app do
       run {|env| [200, { "content-type" => "text/plain" }, ["OK"]]}
@@ -48,7 +73,7 @@ describe Rack::Builder do
 
   it "raises if #run provided both app and block" do
     proc {
-      app = builder_to_app do
+      builder_to_app do
         run(Object.new) {|env| [200, { "content-type" => "text/plain" }, ["OK"]]}
       end
     }.must_raise(ArgumentError)

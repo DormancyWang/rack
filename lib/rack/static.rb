@@ -93,6 +93,9 @@ module Rack
     def initialize(app, options = {})
       @app = app
       @urls = options[:urls] || ["/favicon.ico"]
+      if @urls.kind_of?(Array)
+        @urls = @urls.map { |url| [url, url.end_with?('/') ? url : "#{url}/".freeze].freeze }.freeze
+      end
       @index = options[:index]
       @gzip = options[:gzip]
       @cascade = options[:cascade]
@@ -115,7 +118,7 @@ module Rack
     end
 
     def route_file(path)
-      @urls.kind_of?(Array) && @urls.any? { |url| path.index(url) == 0 }
+      @urls.kind_of?(Array) && @urls.any? { |url, url_slash| path == url || path.start_with?(url_slash) }
     end
 
     def can_serve(path)
@@ -165,6 +168,8 @@ module Rack
 
     # Convert HTTP header rules to HTTP headers
     def applicable_rules(path)
+      path = ::Rack::Utils.unescape_path(path)
+
       @header_rules.find_all do |rule, new_headers|
         case rule
         when :all
@@ -172,10 +177,9 @@ module Rack
         when :fonts
           /\.(?:ttf|otf|eot|woff2|woff|svg)\z/.match?(path)
         when String
-          path = ::Rack::Utils.unescape(path)
           path.start_with?(rule) || path.start_with?('/' + rule)
         when Array
-          /\.(#{rule.join('|')})\z/.match?(path)
+          /\.#{Regexp.union(rule)}\z/.match?(path)
         when Regexp
           rule.match?(path)
         else

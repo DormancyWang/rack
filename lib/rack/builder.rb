@@ -156,16 +156,15 @@ module Rack
     # All requests through to this application will first be processed by the middleware class.
     # The +call+ method in this example sets an additional environment key which then can be
     # referenced in the application if required.
-    def use(middleware, *args, &block)
+    def use(middleware, ...)
       if @map
         mapping, @map = @map, nil
         @use << proc { |app| generate_map(app, mapping) }
       end
-      @use << proc { |app| middleware.new(app, *args, &block) }
+      @use << proc { |app| middleware.new(app, ...) }
+
+      nil
     end
-    # :nocov:
-    ruby2_keywords(:use) if respond_to?(:ruby2_keywords, true)
-    # :nocov:
 
     # Takes a block or argument that is an object that responds to #call and
     # returns a Rack response.
@@ -194,6 +193,8 @@ module Rack
       raise ArgumentError, "Both app and block given!" if app && block_given?
 
       @run = app || block
+
+      nil
     end
 
     # Takes a lambda or block that is used to warm-up the application. This block is called
@@ -252,6 +253,8 @@ module Rack
     def map(path, &block)
       @map ||= {}
       @map[path] = block
+
+      nil
     end
 
     # Freeze the app (set using run) and all middleware instances when building the application

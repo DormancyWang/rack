@@ -27,6 +27,10 @@ module Rack
       include BadRequest
     end
 
+    class IncompatibleEncodingError < EncodingError
+      include BadRequest
+    end
+
     # ParamsTooDeepError is the old name for the error that is raised when params
     # are recursively nested over the specified limit. Make it the same as
     # as QueryLimitError, so that code that rescues ParamsTooDeepError error
@@ -48,7 +52,7 @@ module Rack
         end
       end
 
-      val
+      val if val >= 0
     end
 
     BYTESIZE_LIMIT = env_int.call("RACK_QUERY_PARSER_BYTESIZE_LIMIT", 4194304)
@@ -56,6 +60,8 @@ module Rack
 
     PARAMS_LIMIT = env_int.call("RACK_QUERY_PARSER_PARAMS_LIMIT", 4096)
     private_constant :PARAMS_LIMIT
+
+    attr_reader :bytesize_limit
 
     def initialize(params_class, param_depth_limit, bytesize_limit: BYTESIZE_LIMIT, params_limit: PARAMS_LIMIT)
       @params_class = params_class
@@ -69,14 +75,9 @@ module Rack
     # to parse cookies by changing the characters used in the second parameter
     # (which defaults to '&').
     def parse_query(qs, separator = nil, &unescaper)
-      unescaper ||= method(:unescape)
-
       params = make_params
 
-      check_query_string(qs, separator).split(separator ? (COMMON_SEP[separator] || /[#{separator}] */n) : DEFAULT_SEP).each do |p|
-        next if p.empty?
-        k, v = p.split('=', 2).map!(&unescaper)
-
+      each_query_pair(qs, separator, unescaper) do |k, v|
         if cur = params[k]
           if cur.class == Array
             params[k] << v
@@ -91,6 +92,19 @@ module Rack
       return params.to_h
     end
 
+    # Parses a query string by breaking it up at the '&', returning all key-value
+    # pairs as an array of [key, value] arrays. Unlike parse_query, this preserves
+    # all duplicate keys rather than collapsing them.
+    def parse_query_pairs(qs, separator = nil)
+      pairs = []
+
+      each_query_pair(qs, separator) do |k, v|
+        pairs << [k, v]
+      end
+
+      pairs
+    end
+
     # parse_nested_query expands a query string into structural types. Supported
     # types are Arrays, Hashes and basic value types. It is possible to supply
     # query strings with parameters of conflicting types, in this case a
@@ -99,17 +113,11 @@ module Rack
     def parse_nested_query(qs, separator = nil)
       params = make_params
 
-      unless qs.nil? || qs.empty?
-        check_query_string(qs, separator).split(separator ? (COMMON_SEP[separator] || /[#{separator}] */n) : DEFAULT_SEP).each do |p|
-          k, v = p.split('=', 2).map! { |s| unescape(s) }
-
-          _normalize_params(params, k, v, 0)
-        end
+      each_query_pair(qs, separator) do |k, v|
+        _normalize_params(params, k, v, 0)
       end
 
       return params.to_h
-    rescue ArgumentError => e
-      raise InvalidParameterError, e.message, e.backtrace
     end
 
     # normalize_params recursively expands parameters into structural types. If
@@ -187,6 +195,8 @@ module Rack
       end
 
       params
+    rescue Encoding::CompatibilityError
+      raise IncompatibleEncodingError
     end
 
     def make_params
@@ -215,20 +225,36 @@ module Rack
       true
     end
 
-    def check_query_string(qs, sep)
-      if qs
-        if qs.bytesize > @bytesize_limit
-          raise QueryLimitError, "total query size (#{qs.bytesize}) exceeds limit (#{@bytesize_limit})"
-        end
+    def each_query_pair(qs, separator, unescaper = nil)
+      return if !qs || qs.empty?
 
-        if (param_count = qs.count(sep.is_a?(String) ? sep : '&')) >= @params_limit
-          raise QueryLimitError, "total number of query parameters (#{param_count+1}) exceeds limit (#{@params_limit})"
-        end
-
-        qs
-      else
-        ''
+      if @bytesize_limit && qs.bytesize > @bytesize_limit
+        raise QueryLimitError, "total query size exceeds limit (#{@bytesize_limit})"
       end
+
+      sep = separator ? (COMMON_SEP[separator] || /[#{separator}] */n) : DEFAULT_SEP
+      pairs = @params_limit ? qs.split(sep, @params_limit + 1) : qs.split(sep)
+
+      if @params_limit && pairs.size > @params_limit
+        param_count = pairs.size + pairs.last.count(separator || "&")
+        raise QueryLimitError, "total number of query parameters (#{param_count}) exceeds limit (#{@params_limit})"
+      end
+
+      if unescaper
+        pairs.each do |p|
+          next if p.empty?
+          k, v = p.split('=', 2).map!(&unescaper)
+          yield k, v
+        end
+      else
+        pairs.each do |p|
+          next if p.empty?
+          k, v = p.split('=', 2).map! { |s| unescape(s) }
+          yield k, v
+        end
+      end
+    rescue ArgumentError => e
+      raise InvalidParameterError, e.message, e.backtrace
     end
 
     def unescape(string, encoding = Encoding::UTF_8)

@@ -3,11 +3,11 @@
 require_relative 'constants'
 require_relative 'utils'
 require_relative 'media_type'
+require_relative 'multipart'
 
 module Rack
   # Rack::Request provides a convenient interface to a Rack
-  # environment.  It is stateless, the environment +env+ passed to the
-  # constructor will be directly modified.
+  # environment.
   #
   #   req = Rack::Request.new(env)
   #   req.post?
@@ -41,7 +41,7 @@ module Rack
     end
 
     @forwarded_priority = [:forwarded, :x_forwarded]
-    @x_forwarded_proto_priority = [:proto, :scheme]
+    @x_forwarded_proto_priority = [:ssl, :proto, :scheme]
 
     valid_ipv4_octet = /\.(25[0-5]|2[0-4][0-9]|[01]?[0-9]?[0-9])/
 
@@ -53,7 +53,7 @@ module Rack
       /\A172\.(1[6-9]|2[0-9]|3[01])#{valid_ipv4_octet}{2}\z/,   # private IPv4 range 172.16.0.0 .. 172.31.255.255
       /\A192\.168#{valid_ipv4_octet}{2}\z/,                     # private IPv4 range 192.168.x.x
       /\Alocalhost\z|\Aunix(\z|:)/i,                            # localhost hostname, and unix domain sockets
-    )
+    ).freeze
 
     self.ip_filter = lambda { |ip| trusted_proxies.match?(ip) }
 
@@ -61,8 +61,7 @@ module Rack
 
     def initialize(env)
       @env = env
-      @ip = nil
-      @params = nil
+      @ip = @params = @headers = @query_parser = nil
     end
 
     def ip
@@ -82,6 +81,88 @@ module Rack
       v = super
       @params = nil
       v
+    end
+
+    def headers
+      @headers ||= Headers.new(@env)
+    end
+
+    class Headers
+      def initialize(env)
+        @env = env
+      end
+
+      def [](k)
+        @env[header_to_env_key(k)]
+      end
+
+      def []=(k, v)
+        @env[header_to_env_key(k)] = v
+      end
+
+      def add(k, v)
+        k = header_to_env_key(k)
+        case existing = @env[k]
+        when nil
+          @env[k] = v
+        when String
+          @env[k] = [existing, v]
+        when Array
+          existing << v
+        end
+      end
+
+      def delete(k)
+        @env.delete(header_to_env_key(k))
+      end
+
+      def each
+        return to_enum(:each) unless block_given?
+
+        @env.each do |k, v|
+          next unless k = env_to_header_key(k)
+          yield k, v
+        end
+      end
+
+      def fetch(k, &block)
+        @env.fetch(header_to_env_key(k), &block)
+      end
+
+      def has_key?(k)
+        @env.has_key?(header_to_env_key(k))
+      end
+
+      def to_h
+        h = {}
+        each{|k, v| h[k] = v}
+        h
+      end
+
+      private
+
+      def env_to_header_key(k)
+        case k
+        when /\AHTTP_/
+          k = k[5..-1]
+          k.downcase!
+          k.tr!('_', '-')
+          k
+        when "CONTENT_LENGTH", "CONTENT_TYPE"
+          k = k.downcase
+          k.tr!('_', '-')
+          k
+        end
+      end
+
+      def header_to_env_key(k)
+        k = k.upcase
+        k.tr!('-', '_')
+        unless k == "CONTENT_LENGTH" || k == "CONTENT_TYPE"
+          k = "HTTP_#{k}"
+        end
+        k
+      end
     end
 
     module Env
@@ -245,6 +326,9 @@ module Rack
       # Checks the HTTP request method (or verb) to see if it was of type PUT
       def put?;     request_method == PUT     end
 
+      # Checks the HTTP request method (or verb) to see if it was of type QUERY
+      def query?;   request_method == QUERY   end
+
       # Checks the HTTP request method (or verb) to see if it was of type TRACE
       def trace?;   request_method == TRACE   end
 
@@ -254,12 +338,8 @@ module Rack
       def scheme
         if get_header(HTTPS) == 'on'
           'https'
-        elsif get_header(HTTP_X_FORWARDED_SSL) == 'on'
-          'https'
-        elsif forwarded_scheme
-          forwarded_scheme
         else
-          get_header(RACK_URL_SCHEME)
+          forwarded_scheme || get_header(RACK_URL_SCHEME)
         end
       end
 
@@ -317,6 +397,15 @@ module Rack
 
       def xhr?
         get_header("HTTP_X_REQUESTED_WITH") == "XMLHttpRequest"
+      end
+
+      # Checks whether the `Sec-Purpose` header is set to indicate a `prefetch`
+      # request through, e.g., <a href="..." rel="prefetch">...</a>.
+      #
+      # https://developer.mozilla.org/en-US/docs/Web/HTTP/Reference/Headers/Sec-Purpose
+      # https://wicg.github.io/nav-speculation/prefetch.html#sec-purpose-header
+      def prefetch?
+        get_header("HTTP_SEC_PURPOSE") == "prefetch"
       end
 
       # The `HTTP_HOST` header.
@@ -492,6 +581,50 @@ module Rack
         get_header(RACK_REQUEST_QUERY_HASH) || set_header(RACK_REQUEST_QUERY_HASH, parse_query(query_string, '&'))
       end
 
+      # Returns the form data pairs received in the request body.
+      #
+      # This method support both application/x-www-form-urlencoded and
+      # multipart/form-data.
+      def form_pairs
+        if pairs = get_header(RACK_REQUEST_FORM_PAIRS)
+          return pairs
+        elsif error = get_header(RACK_REQUEST_FORM_ERROR)
+          raise error.class, error.message, cause: error.cause
+        end
+
+        begin
+          rack_input = get_header(RACK_INPUT)
+
+          # Otherwise, figure out how to parse the input:
+          if rack_input.nil?
+            set_header(RACK_REQUEST_FORM_PAIRS, [])
+          elsif form_data? || parseable_data?
+            if pairs = Rack::Multipart.parse_multipart(env, Rack::Multipart::ParamList)
+              set_header RACK_REQUEST_FORM_PAIRS, pairs
+            else
+              # Add 2 bytes. One to check whether it is over the limit, and a second
+              # in case the slice! call below removes the last byte
+              # If read returns nil, use the empty string
+              bytesize = query_parser.bytesize_limit ? query_parser.bytesize_limit + 2 : nil
+              form_vars = get_header(RACK_INPUT).read(bytesize) || ''
+
+              # Fix for Safari Ajax postings that always append \0
+              # form_vars.sub!(/\0\z/, '') # performance replacement:
+              form_vars.slice!(-1) if form_vars.end_with?("\0")
+
+              set_header RACK_REQUEST_FORM_VARS, form_vars
+              pairs = query_parser.parse_query_pairs(form_vars, '&')
+              set_header(RACK_REQUEST_FORM_PAIRS, pairs)
+            end
+          else
+            set_header(RACK_REQUEST_FORM_PAIRS, [])
+          end
+        rescue => error
+          set_header(RACK_REQUEST_FORM_ERROR, error)
+          raise
+        end
+      end
+
       # Returns the data received in the request body.
       #
       # This method support both application/x-www-form-urlencoded and
@@ -503,33 +636,8 @@ module Rack
           raise error.class, error.message, cause: error.cause
         end
 
-        begin
-          rack_input = get_header(RACK_INPUT)
-
-          # Otherwise, figure out how to parse the input:
-          if rack_input.nil?
-            set_header(RACK_REQUEST_FORM_HASH, {})
-          elsif form_data? || parseable_data?
-            if pairs = Rack::Multipart.parse_multipart(env, Rack::Multipart::ParamList)
-              set_header RACK_REQUEST_FORM_PAIRS, pairs
-              set_header RACK_REQUEST_FORM_HASH, expand_param_pairs(pairs)
-            else
-              form_vars = get_header(RACK_INPUT).read
-
-              # Fix for Safari Ajax postings that always append \0
-              # form_vars.sub!(/\0\z/, '') # performance replacement:
-              form_vars.slice!(-1) if form_vars.end_with?("\0")
-
-              set_header RACK_REQUEST_FORM_VARS, form_vars
-              set_header RACK_REQUEST_FORM_HASH, parse_query(form_vars, '&')
-            end
-          else
-            set_header(RACK_REQUEST_FORM_HASH, {})
-          end
-        rescue => error
-          set_header(RACK_REQUEST_FORM_ERROR, error)
-          raise
-        end
+        pairs = form_pairs
+        set_header RACK_REQUEST_FORM_HASH, expand_param_pairs(pairs)
       end
 
       # The union of GET and POST data.
@@ -538,6 +646,10 @@ module Rack
       def params
         self.GET.merge(self.POST)
       end
+
+      # Allow overriding the query parser that the receiver will use.
+      # By default Rack::Utils.default_query_parser is used.
+      attr_writer :query_parser
 
       # Destructively update a parameter, whether it's in GET and/or POST. Returns nil.
       #
@@ -594,11 +706,29 @@ module Rack
         parse_http_accept_header(get_header("HTTP_ACCEPT_LANGUAGE"))
       end
 
+      # Determine whether the given IP address is considered a trusted proxy.
+      #
+      # @returns [Boolean] true if the given IP is a trusted proxy, false otherwise.
       def trusted_proxy?(ip)
-        Rack::Request.ip_filter.call(ip)
+        trusted_proxy = config_value(:trusted_proxy)
+
+        case trusted_proxy
+        when nil
+          # Default to class-level ip_filter:
+          Rack::Request.ip_filter.call(ip)
+        when true, false
+          trusted_proxy
+        else
+          # Treat as callable:
+          trusted_proxy.call(ip)
+        end
       end
 
       private
+
+      def config_value(key)
+        env.dig(RACK_REQUEST_CONFIG, key)
+      end
 
       def default_session; {}; end
 
@@ -617,10 +747,7 @@ module Rack
       end
 
       def parse_http_accept_header(header)
-        # It would be nice to use filter_map here, but it's Ruby 2.7+
-        parts = header.to_s.split(',')
-
-        parts.map! do |part|
+        header.to_s.split(',').filter_map do |part|
           part.strip!
           next if part.empty?
 
@@ -633,10 +760,6 @@ module Rack
           end
           [attribute, quality]
         end
-
-        parts.compact!
-
-        parts
       end
 
       # Get an array of values set in the RFC 7239 `Forwarded` request header.
@@ -645,7 +768,7 @@ module Rack
       end
 
       def query_parser
-        Utils.default_query_parser
+        @query_parser || config_value(:query_parser) || Utils.default_query_parser
       end
 
       def parse_query(qs, d = '&')
@@ -693,7 +816,7 @@ module Rack
            |
            :(?:[0-9A-Fa-f]{1,4}(?::[0-9A-Fa-f]{1,4})*)?
          )?
-         :[0-9A-Fa-f]{1,4}%[-0-9A-Za-z._~]+/x)
+         :[0-9A-Fa-f]{1,4}%[-0-9A-Za-z._~]+/x).freeze
 
       AUTHORITY = /
         \A
@@ -701,8 +824,8 @@ module Rack
           # Match IPv6 as a string of hex digits and colons in square brackets
           \[(?<address>#{ipv6})\]
           |
-          # Match any other printable string (except square brackets) as a hostname
-          (?<address>[[[:graph:]&&[^\[\]]]]*?)
+          # Match characters allowed by RFC 3986 Section 3.2.2
+          (?<address>[-a-zA-Z0-9._~%!$&'()*+,;=]*?)
         )
         (:(?<port>\d+))?
         \z
@@ -718,7 +841,8 @@ module Rack
 
       FORWARDED_SCHEME_HEADERS = {
         proto: HTTP_X_FORWARDED_PROTO,
-        scheme: HTTP_X_FORWARDED_SCHEME
+        scheme: HTTP_X_FORWARDED_SCHEME,
+        ssl: HTTP_X_FORWARDED_SSL
       }.freeze
       private_constant :FORWARDED_SCHEME_HEADERS
       def forwarded_scheme
@@ -732,9 +856,13 @@ module Rack
           when :x_forwarded
             x_forwarded_proto_priority.each do |x_type|
               if header = FORWARDED_SCHEME_HEADERS[x_type]
-                split_header(get_header(header)).reverse_each do |scheme|
-                  if allowed_scheme(scheme)
-                    return scheme
+                if x_type == :ssl && get_header(header) == 'on'
+                  return 'https'
+                else
+                  split_header(get_header(header)).reverse_each do |scheme|
+                    if allowed_scheme(scheme)
+                      return scheme
+                    end
                   end
                 end
               end
@@ -750,11 +878,11 @@ module Rack
       end
 
       def forwarded_priority
-        Request.forwarded_priority
+        config_value(:forwarded_priority) || Request.forwarded_priority
       end
 
       def x_forwarded_proto_priority
-        Request.x_forwarded_proto_priority
+        config_value(:x_forwarded_proto_priority) || Request.x_forwarded_proto_priority
       end
     end
 
@@ -762,7 +890,3 @@ module Rack
     include Helpers
   end
 end
-
-# :nocov:
-require_relative 'multipart' unless defined?(Rack::Multipart)
-# :nocov:

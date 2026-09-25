@@ -244,19 +244,28 @@ describe Rack::Lint do
       message.must_match(/One of .* must be set/)
 
     lambda {
+      Rack::Lint.new(valid_app).call(env("PATH_INFO" => "", "SCRIPT_NAME" => ""))
+    }.must_raise(Rack::Lint::LintError).
+      message.must_match(/One of .* must be set/)
+
+    lambda {
+      e = env("PATH_INFO" => "")
+      e.delete("SCRIPT_NAME")
+      Rack::Lint.new(valid_app).call(e)
+    }.must_raise(Rack::Lint::LintError).
+      message.must_match(/One of .* must be set/)
+
+    lambda {
+      e = env("SCRIPT_NAME" => "")
+      e.delete("PATH_INFO")
+      Rack::Lint.new(valid_app).call(e)
+    }.must_raise(Rack::Lint::LintError).
+      message.must_match(/One of .* must be set/)
+
+    lambda {
       Rack::Lint.new(valid_app).call(env("SCRIPT_NAME" => "/"))
     }.must_raise(Rack::Lint::LintError).
       message.must_match(/cannot be .* make it ''/)
-
-    lambda {
-      Rack::Lint.new(valid_app).call(env("rack.response_finished" => "not a callable"))
-    }.must_raise(Rack::Lint::LintError).
-    message.must_match(/rack.response_finished must be an array of callable objects/)
-
-    lambda {
-      Rack::Lint.new(valid_app).call(env("rack.response_finished" => [-> (env) {}, "not a callable"]))
-    }.must_raise(Rack::Lint::LintError).
-    message.must_match(/rack.response_finished values must respond to call/)
   end
 
   it "notice input errors" do
@@ -321,7 +330,7 @@ describe Rack::Lint do
   end
 
   it "accepts empty PATH_INFO" do
-    Rack::Lint.new(valid_app).call(env("PATH_INFO" => "")).first.must_equal 200
+    Rack::Lint.new(valid_app).call(env("PATH_INFO" => "", "SCRIPT_NAME" => "/foo")).first.must_equal 200
   end
 
   it "notices request-target asterisk form errors" do
@@ -643,7 +652,7 @@ describe Rack::Lint do
       body.each { |part| }
       body.each { |part| }
     }.must_raise(Rack::Lint::LintError).
-      message.must_equal 'Response body must only be invoked once (each)'
+      message.must_equal 'Response body must only be called once (each)'
 
     lambda {
       body = Rack::Lint.new(lambda { |env|
@@ -777,7 +786,7 @@ describe Rack::Lint do
       body.call(StringIO.new)
       body.call(nil)
     }.must_raise(Rack::Lint::LintError).
-      message.must_equal 'Response body must only be invoked once (call)'
+      message.must_equal 'Response body must only be called once (call)'
 
     lambda {
       body = Rack::Lint.new(lambda { |env|
@@ -995,7 +1004,7 @@ describe Rack::Lint do
       hijack_called = false
       s = File.open(__FILE__, 'rb')
       env = env({ 'rack.hijack' => proc { |io| hijack_called = true; s } })
-      res = Rack::Lint.new(lambda { |env|
+      Rack::Lint.new(lambda { |env|
                        [201, { "content-type" => "text/plain", "content-length" => "0"}, []]
                      }).call(env)
       hijack_called.must_equal false
@@ -1017,7 +1026,7 @@ describe Rack::Lint do
 
   it "notices when rack.hijack env entry does not return an IO" do
     env = env({ 'rack.hijack' => proc { Object.new } })
-    app = Rack::Lint.new(lambda { |env|
+    Rack::Lint.new(lambda { |env|
                           [201, { "content-type" => "text/plain", "content-length" => "0" }, []]
                          }).call(env)
     env['rack.hijack'].must_raise(Rack::Lint::LintError).
@@ -1062,15 +1071,76 @@ describe Rack::Lint do
       message.must_equal 'rack.hijack header must not be present if server does not support hijacking'
   end
 
-  it "pass valid rack.response_finished" do
+  it "notices rack.response_finished errors" do
+    lambda {
+      Rack::Lint.new(valid_app).call(env("rack.response_finished" => "not a callable"))
+    }.must_raise(Rack::Lint::LintError).
+    message.must_match(/rack.response_finished must be an array of callable objects/)
+
+    lambda {
+      e = env("rack.response_finished" => [proc {}])
+      Rack::Lint.new(valid_app).call(e)
+      e["rack.response_finished"].each(&:call)
+    }.must_raise(ArgumentError).
+    message.must_match(/wrong number of arguments \(given 0, expected 4\)/)
+
+    lambda {
+      e = env("rack.response_finished" => [proc {}])
+      Rack::Lint.new(valid_app).call(e)
+      e["rack.response_finished"].each { |c| c.call(0, 100, {}, nil) }
+    }.must_raise(Rack::Lint::LintError).
+    message.must_match(/not a Hash/)
+
+    lambda {
+      e = env("rack.response_finished" => [proc {}])
+      Rack::Lint.new(valid_app).call(e)
+      e["rack.response_finished"].each { |c| c.call(e, 99, {}, nil) }
+    }.must_raise(Rack::Lint::LintError).
+    message.must_match(/Status must be an Integer >=100/)
+
+    lambda {
+      e = env("rack.response_finished" => [proc {}])
+      Rack::Lint.new(valid_app).call(e)
+      e["rack.response_finished"].each { |c| c.call(e, 100, 0, nil) }
+    }.must_raise(Rack::Lint::LintError).
+    message.must_match(/headers object should be a hash/)
+
+    lambda {
+      e = env("rack.response_finished" => [proc {}])
+      Rack::Lint.new(valid_app).call(e)
+      e["rack.response_finished"].each { |c| c.call(e, nil, nil, 0) }
+    }.must_raise(Rack::Lint::LintError).
+    message.must_match(/must be an Exception or nil/)
+
+    proc_called = 0
+    lambda_called = 0
+
     callable_object = Class.new do
+      attr_reader :called
+
+      def initialize
+        @called = 0
+      end
+
       def call(env, status, headers, error)
+        @called += 1
       end
     end.new
 
-    Rack::Lint.new(lambda { |env|
-                     [200, {}, ["foo"]]
-                   }).call(env({ "rack.response_finished" => [-> (env) {}, lambda { |env| }, callable_object], "content-length" => "3" })).first.must_equal 200
+    e = env({"rack.response_finished" => [
+      proc { proc_called += 1 },
+      ->(_, _, _, _) { lambda_called += 1 },
+      callable_object,
+    ]})
+
+    resp = Rack::Lint.new(valid_app).call(e)
+    resp[0].must_equal 200
+
+    e["rack.response_finished"].each { |c| c.call(e, resp[0], resp[1], nil) }
+
+    assert_equal 1, proc_called
+    assert_equal 1, lambda_called
+    assert_equal 1, callable_object.called
   end
 
   it "notices when the response protocol is not an array of strings" do
@@ -1079,7 +1149,7 @@ describe Rack::Lint do
     })
 
     lambda do
-      response = app.call(env({'rack.protocol' => 'websocket'}))
+      app.call(env({'rack.protocol' => 'websocket'}))
     end
       .must_raise(Rack::Lint::LintError)
       .message.must_equal("rack.protocol must be an Array of Strings")

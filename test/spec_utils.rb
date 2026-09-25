@@ -437,7 +437,7 @@ describe Rack::Utils do
       proto: [ 'https' ]
     })
 
-    Rack::Utils.forwarded_values('for=3.4.5.6; proto=http, proto=https').must_equal({
+    Rack::Utils.forwarded_values("for=3.4.5.6\nproto=http, proto=https").must_equal({
       for: [ '3.4.5.6' ],
       proto: [ 'http', 'https' ]
     })
@@ -447,7 +447,33 @@ describe Rack::Utils do
       proto: [ 'http', 'https' ]
     })
 
+    Rack::Utils.forwarded_values('for="3.4.5.6;host=evil.com"; proto=http, proto=https; for=1.2.3.4').must_equal({
+      for: [ '3.4.5.6;host=evil.com', '1.2.3.4' ],
+      proto: [ 'http', 'https' ]
+    })
+
+    Rack::Utils.forwarded_values('for=" 3.4.5.6\"; ";; proto=http, proto=https; for=1.2.3.4').must_equal({
+      for: [ ' 3.4.5.6"; ', '1.2.3.4' ],
+      proto: [ 'http', 'https' ]
+    })
+
+    Rack::Utils.forwarded_values('proto=http, proto=https; for=1.2.3.4; for=" 3.4.5.6\"; "').must_equal({
+      for: [ '1.2.3.4', ' 3.4.5.6"; ' ],
+      proto: [ 'http', 'https' ]
+    })
+
+    Rack::Utils.forwarded_values('proto=http, proto=https; for=1.2.3.4; for=" 3.4.5.6\"; "; ').must_equal({
+      for: [ '1.2.3.4', ' 3.4.5.6"; ' ],
+      proto: [ 'http', 'https' ]
+    })
+
     Rack::Utils.forwarded_values('for=3.4.5.6; foo=bar').must_be_nil
+
+    Rack::Utils.forwarded_values('for=a;' * 1024).must_equal({for: ["a"]*1024})
+    Rack::Utils.forwarded_values('for="a' + "\\\\" * 1024 + 'b"').must_equal({for: ['a' + ("\\" * 1024) + 'b']})
+
+    Rack::Utils.forwarded_values('for=a;' * 1025).must_be_nil
+    Rack::Utils.forwarded_values('for="a' + "\\\\" * 1025 + 'b"').must_be_nil
   end
 
   it "select best quality match" do
@@ -492,10 +518,7 @@ describe Rack::Utils do
   end
 
   it "figure out which encodings are acceptable" do
-    helper = lambda do |a, b|
-      Rack::Request.new(Rack::MockRequest.env_for("", "HTTP_ACCEPT_ENCODING" => a))
-      Rack::Utils.select_best_encoding(a, b)
-    end
+    helper = Rack::Utils.method(:select_best_encoding)
 
     helper.call(%w(), [["x", 1]]).must_be_nil
     helper.call(%w(identity), [["identity", 0.0]]).must_be_nil
@@ -513,6 +536,9 @@ describe Rack::Utils do
 
     helper.call(%w(foo bar identity), [["foo", 0], ["bar", 0]]).must_equal "identity"
     helper.call(%w(foo bar baz identity), [["*", 0], ["identity", 0.1]]).must_equal "identity"
+    helper.call(%w(foo bar baz identity), [["*", 0.1], ["identity", 0.2]]).must_equal "identity"
+    helper.call(%w(foo bar baz identity), [["*", 0.1], ["identity", 0.2], ["*", 0.3]]).must_equal "identity"
+    helper.call(%w(foo bar baz identity), [["*", 0.3], ["identity", 0.2], ["*", 0.1]]).must_equal "foo"
   end
 
   it "should perform constant time string comparison" do
@@ -629,9 +655,10 @@ describe Rack::Utils, "cookies" do
   end
 
   it "raises an error if the cookie key is invalid" do
-    lambda do
+    ex = lambda do
       Rack::Utils.set_cookie_header('na e', 'value')
-    end.must_raise(ArgumentError, /invalid cookie key/)
+    end.must_raise(ArgumentError)
+    assert_match(/invalid cookie key/, ex.message)
   end
 
   it "sets partitioned cookie attribute" do
@@ -685,6 +712,18 @@ end
 describe Rack::Utils, "get_byte_ranges" do
   it "returns an empty list if the sum of the ranges is too large" do
     assert_equal [], Rack::Utils.byte_ranges({ "HTTP_RANGE" => "bytes=0-20,0-500" }, 500)
+  end
+
+  it "returns an empty list if the number of ranges exceeds what is allowed" do
+    range = "bytes=#{Array.new(101) { |i| "#{i}=#{i}"}.join(',')}"
+    assert_nil Rack::Utils.byte_ranges({ "HTTP_RANGE" => range }, 500)
+    assert_nil Rack::Utils.get_byte_ranges(range, 500)
+
+    assert_nil Rack::Utils.byte_ranges({ "HTTP_RANGE" => "bytes=0-0,1-1" }, 500, max_ranges: 1)
+    assert_nil Rack::Utils.get_byte_ranges("bytes=0-0,1-1", 500, max_ranges: 1)
+
+    assert_equal [0..0], Rack::Utils.byte_ranges({ "HTTP_RANGE" => "bytes=0-0" }, 500, max_ranges: 1)
+    assert_equal [0..0], Rack::Utils.get_byte_ranges("bytes=0-0", 500, max_ranges: 1)
   end
 
   it "parse simple byte ranges from env" do
